@@ -1,0 +1,17 @@
+## Interface: 120001, 120005
+## Title: CafeRaidPlanner
+## Notes: Plan raid cooldowns on a map, like MDT for raids.
+## Author: Gustaf
+## Version: 0.1.0-dev
+## SavedVariables: CafeRaidPlannerDB
+## OptionalDeps: Ace3, LibDeflate
+## X-Category: Raid
+
+libs\load_libs.xml
+init.lua
+Core.lua
+Share.lua
+Plan.lua
+Tracker.lua
+Comms.lua
+UI.lua
