@@ -49,11 +49,18 @@ function Plan:SetCurrentPullIdx(idx)
     end
     if idx < 1 then idx = 1 end
     if idx > n then idx = n end
+    local prev = CRP.db.global.currentPullIdx
     CRP.db.global.currentPullIdx = idx
     -- Intentionally don't reset tracker state: kills are stored per-pull-uid,
     -- so navigating between pulls should just show each pull's own progress.
     if CRP.ui and CRP.ui.Window and CRP.ui.Window.Refresh then
         CRP.ui.Window:Refresh()
+    end
+    -- Broadcast pull idx when RL/assist navigates, so receivers stay in sync.
+    -- Guard prev ~= idx so receivers applying an incoming CRPPULL don't bounce
+    -- it back into the channel.
+    if prev ~= idx and CRP.Comms and CRP.Comms.CanPush and CRP.Comms:CanPush() then
+        CRP.Comms:PushPull()
     end
 end
 
@@ -71,17 +78,6 @@ function Plan:PackById(packId)
     if not p then return nil end
     for _, pack in ipairs(p.packs) do
         if pack.id == packId then return pack end
-    end
-    return nil
-end
-
--- Look up a boss definition in the current plan by its string id (e.g. "Hydross").
--- Returns nil if the plan doesn't include bosses (older envelopes).
-function Plan:BossById(bossId)
-    local p = self:Current()
-    if not p or not p.bosses or not bossId then return nil end
-    for _, boss in ipairs(p.bosses) do
-        if boss.id == bossId then return boss end
     end
     return nil
 end
@@ -107,8 +103,9 @@ function Plan:NpcName(npcId)
     return nameCache[npcId]
 end
 
--- Aggregate mob counts across all packs + boss (if any) in the given pull.
--- Keys are npcIds; the tracker matches these against UNIT_DIED GUIDs.
+-- Aggregate mob counts across all packs in the given pull. Bosses are ordinary
+-- packs (with a slug + icon) whose members list contains the boss npcId, so
+-- this loop captures them naturally — no special case needed.
 function Plan:MobRequirementsForPull(pull)
     local out = {}
     if not pull then return out end
@@ -118,12 +115,6 @@ function Plan:MobRequirementsForPull(pull)
             for _, m in ipairs(pack.members) do
                 out[m.npcId] = (out[m.npcId] or 0) + (m.count or 1)
             end
-        end
-    end
-    if pull.bossId then
-        local boss = self:BossById(pull.bossId)
-        if boss and boss.npcId then
-            out[boss.npcId] = (out[boss.npcId] or 0) + 1
         end
     end
     return out

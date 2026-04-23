@@ -74,7 +74,7 @@ function Share:Decode(str)
         return nil, "malformed envelope"
     end
 
-    -- Web format uses v: 2 currently; accept lower versions if they parse (v1 had
-    -- per-player assignments that just render as empty — no hard break).
+    -- Web format is v3 (bosses baked into packs). v1/v2 payloads may also parse,
+    -- but missing/obsolete fields just render as empty rather than hard-breaking.
     return result
 end

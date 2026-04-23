@@ -3,11 +3,8 @@ local _, CRP = ...
 local AceAddon = LibStub("AceAddon-3.0")
 local AceDB = LibStub("AceDB-3.0")
 
--- Note: we deliberately do NOT mix in AceEvent-3.0. On retail, AceEvent shares
--- one frame across all addons using it; if any of them taints that frame, our
--- RegisterEvent calls fire ADDON_ACTION_FORBIDDEN. We own our event frame
--- below, which keeps us out of that shared taint path.
-local Core = AceAddon:NewAddon("CafeRaidPlanner", "AceConsole-3.0")
+-- AceComm-3.0 embed gives Core :SendCommMessage / :RegisterComm used by Comms.lua.
+local Core = AceAddon:NewAddon("CafeRaidPlanner", "AceConsole-3.0", "AceComm-3.0")
 CRP.Core = Core
 
 local defaults = {
@@ -15,6 +12,7 @@ local defaults = {
         plan = nil,                 -- envelope {v, preset, packs} imported from web
         currentPullIdx = 1,
         autoAdvance = true,         -- advance current pull when all required mobs die
+        autoApplyIncomingPlan = false, -- true → skip receive prompt and apply silently
         trackerState = {            -- persisted kill progress, keyed by instance lockout
             lockoutKey = nil,
             pullUid = nil,
@@ -91,6 +89,15 @@ function Core:SlashHandler(input)
     elseif input == "auto off" then
         CRP.db.global.autoAdvance = false
         self:Print("Auto-advance: off.")
+    elseif input == "autoimport on" then
+        CRP.db.global.autoApplyIncomingPlan = true
+        self:Print("Auto-import incoming plans: on.")
+    elseif input == "autoimport off" then
+        CRP.db.global.autoApplyIncomingPlan = false
+        self:Print("Auto-import incoming plans: off (will prompt).")
+    elseif input == "push" then
+        local ok, err = CRP.Comms:PushPlan()
+        if not ok and err then self:Print("Push failed: " .. err) end
     elseif input == "debug on" or input == "debug" then
         CRP.db.global.debug = true
         self:Print("Debug: on. Each tracked kill will print its GUID.")
@@ -102,6 +109,6 @@ function Core:SlashHandler(input)
         if CRP.ui.Window then CRP.ui.Window:Refresh() end
         self:Print("View mode: " .. input .. ".")
     else
-        self:Print("Usage: /crp [show | import | next | prev | reset | clearkills | auto on|off | my | raid]")
+        self:Print("Usage: /crp [show | import | next | prev | reset | clearkills | push | auto on|off | autoimport on|off | my | raid]")
     end
 end

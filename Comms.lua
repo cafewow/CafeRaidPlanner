@@ -1,45 +1,113 @@
 local _, CRP = ...
 
--- Comms module. Intentionally a scaffold right now — the wire protocol is
--- sketched out but the actual AceComm registration and chunked transmission
--- lives inside TODO blocks. The public surface (PushPull, PushPlan, CanPush,
--- etc.) is final so UI callsites and future implementation can land without
--- further shape changes.
+-- Comms: AceComm-backed plan/pull sync between raid leader and receivers.
 --
--- Protocol sketch (to be implemented in phase C):
+--   CRPPLAN   Full plan payload { envelope, currentPullIdx }. Sent by RL/assist
+--             via "RAID"/"PARTY" (broadcast) or "WHISPER" (answering CRPREQ).
+--             Receivers prompt the user before replacing the local plan, unless
+--             CRP.db.global.autoApplyIncomingPlan is true.
 --
---   Prefix "CRPPULL"   RL broadcasts current pull index.
---                      Payload: "<planUid>:<pullIdx>"
---                      Receivers apply iff their loaded plan's preset.id
---                      matches planUid AND sender is group leader/assist.
+--   CRPPULL   "<planUid>:<idx>" — pull-index change. Sent by RL on navigation.
+--             Receivers apply only if planUid matches their loaded plan's id.
 --
---   Prefix "CRPPLAN"   RL pushes full plan envelope.
---                      Payload: AceSerializer(envelope), chunked by AceComm.
---                      Receivers prompt "Raid leader sent a plan — import?".
---
---   Prefix "CRPREQ"    Late joiner asks whoever has a plan to push it.
---                      Payload: "" (empty, just a signal).
---                      Anyone who has a matching plan responds with CRPPLAN.
---
--- Channel selection:
---   IsInRaid()     → "RAID"
---   IsInGroup()    → "PARTY"
---   otherwise      → no-op (nothing to sync with).
+--   CRPREQ    Empty signal. Sent by a client that opened the window with no
+--             plan loaded; anyone with a plan whispers a CRPPLAN back.
 
 local Comms = {}
 CRP.Comms = Comms
 
-local PREFIX_PULL = "CRPPULL"
 local PREFIX_PLAN = "CRPPLAN"
+local PREFIX_PULL = "CRPPULL"
 local PREFIX_REQ  = "CRPREQ"
+
+local AceSerializer = LibStub("AceSerializer-3.0")
+
+-- ---------------------------------------------------------------------------
+-- Helpers
+-- ---------------------------------------------------------------------------
+
+local function stripRealm(name)
+    if not name or name == "" then return name end
+    return name:match("^([^-]+)") or name
+end
+
+local function channel()
+    if IsInRaid() then return "RAID" end
+    if IsInGroup() then return "PARTY" end
+    return nil
+end
+
+local function isSelf(sender)
+    return stripRealm(sender) == UnitName("player")
+end
+
+-- True if `sender` is currently raid leader, raid assistant, or (in a party)
+-- the party leader. GetRaidRosterInfo rank: 2 = leader, 1 = assist, 0 = member.
+local function senderHasAuthority(sender)
+    local want = stripRealm(sender)
+    if IsInRaid() then
+        for i = 1, GetNumGroupMembers() do
+            local name, rank = GetRaidRosterInfo(i)
+            if name and stripRealm(name) == want then
+                return (rank or 0) >= 1
+            end
+        end
+        return false
+    elseif IsInGroup() then
+        -- Party: only leader has authority.
+        local numMembers = GetNumGroupMembers()
+        for i = 1, numMembers - 1 do
+            local unit = "party" .. i
+            if stripRealm(UnitName(unit) or "") == want then
+                return UnitIsGroupLeader(unit)
+            end
+        end
+        if stripRealm(UnitName("player") or "") == want then
+            return UnitIsGroupLeader("player")
+        end
+    end
+    return false
+end
+
+-- ---------------------------------------------------------------------------
+-- Receive prompt
+-- ---------------------------------------------------------------------------
+
+StaticPopupDialogs["CRP_CONFIRM_IMPORT"] = {
+    text = "%s",                    -- filled via StaticPopup_Show(…, summary)
+    button1 = ACCEPT or "Accept",
+    button2 = CANCEL or "Cancel",
+    OnAccept = function(self)
+        local data = self.data
+        if data and data.envelope then
+            Comms:_ApplyIncoming(data.envelope, data.currentPullIdx, data.sender)
+        end
+    end,
+    timeout = 60,
+    hideOnEscape = true,
+    whileDead = true,
+    preferredIndex = 3,
+}
+
+function Comms:_ApplyIncoming(envelope, currentPullIdx, sender)
+    if type(envelope) ~= "table" or type(envelope.preset) ~= "table" then return end
+    CRP.Plan:Import(envelope)
+    if type(currentPullIdx) == "number" then
+        CRP.Plan:SetCurrentPullIdx(currentPullIdx)
+    end
+    if CRP.ui and CRP.ui.Window and CRP.ui.Window.Refresh then
+        CRP.ui.Window:Refresh()
+    end
+    print(("|cff38c24fCRP:|r imported plan from %s (%d pulls, %d packs)."):format(
+        stripRealm(sender or "?"),
+        #(envelope.preset.pulls or {}),
+        #(envelope.packs or {})))
+end
 
 -- ---------------------------------------------------------------------------
 -- Capability checks
 -- ---------------------------------------------------------------------------
 
--- True iff the user is in a group large enough to sync with AND has authority
--- to push (leader in party, leader-or-assist in raid). Other addons that sync
--- raid state (BigWigs, MRT, MDT's LiveSession) use the same rule.
 function Comms:CanPush()
     if IsInRaid() then
         return UnitIsGroupLeader("player") or (UnitIsGroupAssistant and UnitIsGroupAssistant("player"))
@@ -49,74 +117,89 @@ function Comms:CanPush()
     return false
 end
 
-local function currentChannel()
-    if IsInRaid() then return "RAID" end
-    if IsInGroup() then return "PARTY" end
-    return nil
-end
-
 -- ---------------------------------------------------------------------------
 -- Outgoing
 -- ---------------------------------------------------------------------------
 
--- Broadcast the current pull index to the raid. No-op if not permitted.
-function Comms:PushPull()
-    if not self:CanPush() then return false, "not in a group you lead" end
-    local envelope = CRP.Plan:Current()
-    if not envelope then return false, "no plan loaded" end
-    local idx = CRP.Plan:CurrentPullIdx()
-    local planUid = (envelope.preset and envelope.preset.id) or ""
-    local channel = currentChannel()
-    if not channel then return false, "no channel" end
-
-    -- TODO(phase C): register PREFIX_PULL with AceComm and send the payload.
-    --   local AceComm = LibStub("AceComm-3.0")
-    --   AceComm:SendCommMessage(PREFIX_PULL, planUid..":"..tostring(idx), channel)
-    print(string.format("|cff8888ffCRP:|r (stub) would push pull %d (plan %s) on %s",
-        idx, planUid, channel))
-    return true
-end
-
--- Broadcast the entire plan envelope so receivers can import it without
--- needing a paste string.
 function Comms:PushPlan()
     if not self:CanPush() then return false, "not in a group you lead" end
     local envelope = CRP.Plan:Current()
     if not envelope then return false, "no plan loaded" end
-
-    -- TODO(phase C): serialize + deflate (or just serialize; AceComm already
-    -- handles chunking). Then send on PREFIX_PLAN.
-    --   local AceSerializer = LibStub("AceSerializer-3.0")
-    --   local payload = AceSerializer:Serialize(envelope)
-    --   AceComm:SendCommMessage(PREFIX_PLAN, payload, currentChannel(), nil, "BULK")
-    print("|cff8888ffCRP:|r (stub) would push full plan")
+    local ch = channel()
+    if not ch then return false, "not in a group" end
+    local payload = AceSerializer:Serialize({
+        envelope = envelope,
+        currentPullIdx = CRP.Plan:CurrentPullIdx(),
+    })
+    CRP.Core:SendCommMessage(PREFIX_PLAN, payload, ch, nil, "BULK")
+    print(("|cff8888ffCRP:|r pushed plan (%d pulls, %d packs) to %s."):format(
+        #(envelope.preset.pulls or {}), #(envelope.packs or {}), ch:lower()))
     return true
 end
 
--- Ask whoever has a plan to send it. Used by a late-joiner who opens the
--- window and sees "No plan imported".
+function Comms:PushPull()
+    if not self:CanPush() then return false, "not in a group you lead" end
+    local envelope = CRP.Plan:Current()
+    if not envelope then return false, "no plan loaded" end
+    local ch = channel()
+    if not ch then return false, "not in a group" end
+    local uid = (envelope.preset and envelope.preset.id) or ""
+    local payload = uid .. ":" .. tostring(CRP.Plan:CurrentPullIdx())
+    CRP.Core:SendCommMessage(PREFIX_PULL, payload, ch, nil, "NORMAL")
+    return true
+end
+
 function Comms:RequestPlan()
-    local channel = currentChannel()
-    if not channel then return false, "no channel" end
-    -- TODO(phase C): AceComm:SendCommMessage(PREFIX_REQ, "", channel)
-    print("|cff8888ffCRP:|r (stub) would request plan from group")
+    local ch = channel()
+    if not ch then return false, "not in a group" end
+    CRP.Core:SendCommMessage(PREFIX_REQ, "", ch)
     return true
 end
 
 -- ---------------------------------------------------------------------------
--- Incoming (registered in :Init, handlers implement in phase C)
+-- Incoming
 -- ---------------------------------------------------------------------------
 
 function Comms:Init()
-    -- TODO(phase C): register AceComm prefixes and wire handlers.
-    --   local AceComm = LibStub("AceComm-3.0")
-    --   AceComm:RegisterComm(PREFIX_PULL, function(_, _, payload, _, sender) ... end)
-    --   AceComm:RegisterComm(PREFIX_PLAN, function(_, _, payload, _, sender) ... end)
-    --   AceComm:RegisterComm(PREFIX_REQ,  function(_, _, payload, _, sender) ... end)
-    --
-    -- Receive guardrails to apply in all handlers:
-    --   - Reject messages from self.
-    --   - For CRPPULL/CRPPLAN: check sender is UnitIsGroupLeader / assistant.
-    --   - For CRPPULL: verify planUid matches locally loaded plan; ignore otherwise.
-    --   - For CRPPLAN: prompt user before replacing the local plan.
+    CRP.Core:RegisterComm(PREFIX_PLAN, function(_, _, payload, _, sender)
+        if isSelf(sender) then return end
+        if not senderHasAuthority(sender) then return end
+        local ok, msg = AceSerializer:Deserialize(payload)
+        if not ok or type(msg) ~= "table" or type(msg.envelope) ~= "table" then return end
+        if CRP.db.global.autoApplyIncomingPlan then
+            Comms:_ApplyIncoming(msg.envelope, msg.currentPullIdx, sender)
+        else
+            local env = msg.envelope
+            local summary = ("%s sent a raid plan (%d pulls, %d packs).\n\nImport? Your current plan and kill progress will be replaced."):format(
+                stripRealm(sender), #(env.preset.pulls or {}), #(env.packs or {}))
+            StaticPopup_Show("CRP_CONFIRM_IMPORT", summary, nil, {
+                envelope = env,
+                currentPullIdx = msg.currentPullIdx,
+                sender = sender,
+            })
+        end
+    end)
+
+    CRP.Core:RegisterComm(PREFIX_PULL, function(_, _, payload, _, sender)
+        if isSelf(sender) then return end
+        if not senderHasAuthority(sender) then return end
+        local uid, idxStr = payload:match("^([^:]*):(%d+)$")
+        if not uid or not idxStr then return end
+        local envelope = CRP.Plan:Current()
+        if not envelope or not envelope.preset or envelope.preset.id ~= uid then return end
+        CRP.Plan:SetCurrentPullIdx(tonumber(idxStr))
+    end)
+
+    CRP.Core:RegisterComm(PREFIX_REQ, function(_, _, _, _, sender)
+        if isSelf(sender) then return end
+        -- Anyone holding a plan answers, so late joiners can bootstrap from any
+        -- group member (not just the leader). Reply privately to avoid spam.
+        local envelope = CRP.Plan:Current()
+        if not envelope then return end
+        local payload = AceSerializer:Serialize({
+            envelope = envelope,
+            currentPullIdx = CRP.Plan:CurrentPullIdx(),
+        })
+        CRP.Core:SendCommMessage(PREFIX_PLAN, payload, "WHISPER", Ambiguate(sender, "none"), "BULK")
+    end)
 end
