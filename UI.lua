@@ -258,7 +258,7 @@ local function build()
 	-- Pull counter is a button that opens a jump-to-pull popup (our own —
 	-- EasyMenu isn't available on every client, and it doesn't scroll).
 	pullCounter = CreateFrame("Button", nil, nav, "UIPanelButtonTemplate")
-	pullCounter:SetSize(170, 15)
+	pullCounter:SetSize(100, 18)
 	pullCounter:SetPoint("LEFT", nextBtn, "RIGHT", 8, 0)
 	pullCounter:SetText("")
 	pullCounter:SetScript("OnClick", function(self)
@@ -743,8 +743,8 @@ end
 -- Scrollable jump-to-pull popup. Created eagerly in build() and refreshed in
 -- Window:Refresh so it's always populated and sized before the first click.
 local pullPopup, pullPopupRowPool, pullPopupContent, pullPopupScroll
-local PULL_POPUP_W, PULL_POPUP_H = 260, 260
-local PULL_POPUP_ROW_H = 18
+local PULL_POPUP_W, PULL_POPUP_H = 180, 200
+local PULL_POPUP_ROW_H = 16
 
 function buildPullPopup()
 	pullPopup = CreateFrame("Frame", "CafeRaidPlannerPullPopup", UIParent, "BackdropTemplate")
