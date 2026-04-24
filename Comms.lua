@@ -21,6 +21,28 @@ local PREFIX_PULL = "CRPPULL"
 local PREFIX_REQ  = "CRPREQ"
 
 local AceSerializer = LibStub("AceSerializer-3.0")
+local LibDeflate = LibStub("LibDeflate")
+
+-- Pack a message table into a wire payload: Serialize → Deflate → addon-safe
+-- encoding. Shrinks a ~40 KB plan envelope to ~5 KB, which matters because
+-- ChatThrottleLib caps outgoing addon traffic and BULK priority is the slowest
+-- lane. At NORMAL priority a compressed plan delivers in a couple of seconds
+-- instead of nearly a minute.
+local function encodePayload(tbl)
+    local serialized = AceSerializer:Serialize(tbl)
+    local compressed = LibDeflate:CompressDeflate(serialized)
+    return LibDeflate:EncodeForWoWAddonChannel(compressed)
+end
+
+local function decodePayload(encoded)
+    local compressed = LibDeflate:DecodeForWoWAddonChannel(encoded)
+    if not compressed then return nil end
+    local serialized = LibDeflate:DecompressDeflate(compressed)
+    if not serialized then return nil end
+    local ok, tbl = AceSerializer:Deserialize(serialized)
+    if not ok then return nil end
+    return tbl
+end
 
 -- ---------------------------------------------------------------------------
 -- Helpers
@@ -92,12 +114,8 @@ StaticPopupDialogs["CRP_CONFIRM_IMPORT"] = {
 function Comms:_ApplyIncoming(envelope, currentPullIdx, sender)
     if type(envelope) ~= "table" or type(envelope.preset) ~= "table" then return end
     CRP.Plan:Import(envelope)
-    if type(currentPullIdx) == "number" then
-        CRP.Plan:SetCurrentPullIdx(currentPullIdx)
-    end
-    if CRP.ui and CRP.ui.Window and CRP.ui.Window.Refresh then
-        CRP.ui.Window:Refresh()
-    end
+    -- silent=true: don't re-broadcast our acceptance back into the channel.
+    CRP.Plan:SetCurrentPullIdx(type(currentPullIdx) == "number" and currentPullIdx or 1, true)
     print(("|cff38c24fCRP:|r imported plan from %s (%d pulls, %d packs)."):format(
         stripRealm(sender or "?"),
         #(envelope.preset.pulls or {}),
@@ -110,7 +128,7 @@ end
 
 function Comms:CanPush()
     if IsInRaid() then
-        return UnitIsGroupLeader("player") or (UnitIsGroupAssistant and UnitIsGroupAssistant("player"))
+        return UnitIsGroupLeader("player") or UnitIsGroupAssistant("player")
     elseif IsInGroup() then
         return UnitIsGroupLeader("player")
     end
@@ -127,13 +145,13 @@ function Comms:PushPlan()
     if not envelope then return false, "no plan loaded" end
     local ch = channel()
     if not ch then return false, "not in a group" end
-    local payload = AceSerializer:Serialize({
+    local payload = encodePayload({
         envelope = envelope,
         currentPullIdx = CRP.Plan:CurrentPullIdx(),
     })
-    CRP.Core:SendCommMessage(PREFIX_PLAN, payload, ch, nil, "BULK")
-    print(("|cff8888ffCRP:|r pushed plan (%d pulls, %d packs) to %s."):format(
-        #(envelope.preset.pulls or {}), #(envelope.packs or {}), ch:lower()))
+    CRP.Core:SendCommMessage(PREFIX_PLAN, payload, ch, nil, "NORMAL")
+    print(("|cff8888ffCRP:|r pushed plan (%d pulls, %d packs, %d bytes) to %s."):format(
+        #(envelope.preset.pulls or {}), #(envelope.packs or {}), #payload, ch:lower()))
     return true
 end
 
@@ -161,11 +179,13 @@ end
 -- ---------------------------------------------------------------------------
 
 function Comms:Init()
-    CRP.Core:RegisterComm(PREFIX_PLAN, function(_, _, payload, _, sender)
+    -- AceComm fires registered function callbacks with 4 positional args:
+    -- (prefix, message, distribution, sender). No implicit self.
+    CRP.Core:RegisterComm(PREFIX_PLAN, function(_, message, _, sender)
         if isSelf(sender) then return end
         if not senderHasAuthority(sender) then return end
-        local ok, msg = AceSerializer:Deserialize(payload)
-        if not ok or type(msg) ~= "table" or type(msg.envelope) ~= "table" then return end
+        local msg = decodePayload(message)
+        if type(msg) ~= "table" or type(msg.envelope) ~= "table" then return end
         if CRP.db.global.autoApplyIncomingPlan then
             Comms:_ApplyIncoming(msg.envelope, msg.currentPullIdx, sender)
         else
@@ -180,26 +200,26 @@ function Comms:Init()
         end
     end)
 
-    CRP.Core:RegisterComm(PREFIX_PULL, function(_, _, payload, _, sender)
+    CRP.Core:RegisterComm(PREFIX_PULL, function(_, message, _, sender)
         if isSelf(sender) then return end
         if not senderHasAuthority(sender) then return end
-        local uid, idxStr = payload:match("^([^:]*):(%d+)$")
+        local uid, idxStr = message:match("^([^:]*):(%d+)$")
         if not uid or not idxStr then return end
         local envelope = CRP.Plan:Current()
         if not envelope or not envelope.preset or envelope.preset.id ~= uid then return end
-        CRP.Plan:SetCurrentPullIdx(tonumber(idxStr))
+        CRP.Plan:SetCurrentPullIdx(tonumber(idxStr), true)  -- silent, no echo
     end)
 
-    CRP.Core:RegisterComm(PREFIX_REQ, function(_, _, _, _, sender)
+    CRP.Core:RegisterComm(PREFIX_REQ, function(_, _, _, sender)
         if isSelf(sender) then return end
         -- Anyone holding a plan answers, so late joiners can bootstrap from any
         -- group member (not just the leader). Reply privately to avoid spam.
         local envelope = CRP.Plan:Current()
         if not envelope then return end
-        local payload = AceSerializer:Serialize({
+        local payload = encodePayload({
             envelope = envelope,
             currentPullIdx = CRP.Plan:CurrentPullIdx(),
         })
-        CRP.Core:SendCommMessage(PREFIX_PLAN, payload, "WHISPER", Ambiguate(sender, "none"), "BULK")
+        CRP.Core:SendCommMessage(PREFIX_PLAN, payload, "WHISPER", Ambiguate(sender, "none"), "NORMAL")
     end)
 end

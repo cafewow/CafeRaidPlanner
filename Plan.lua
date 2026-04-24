@@ -41,7 +41,10 @@ function Plan:CurrentPull()
     return pulls[idx], idx
 end
 
-function Plan:SetCurrentPullIdx(idx)
+-- `silent = true` suppresses the pull-idx broadcast. Used by the comms layer
+-- when applying a remote CRPPULL/CRPPLAN so N assists don't all echo the same
+-- idx back into the channel after every navigation.
+function Plan:SetCurrentPullIdx(idx, silent)
     local n = #self:Pulls()
     if n == 0 then
         CRP.db.global.currentPullIdx = 1
@@ -56,10 +59,7 @@ function Plan:SetCurrentPullIdx(idx)
     if CRP.ui and CRP.ui.Window and CRP.ui.Window.Refresh then
         CRP.ui.Window:Refresh()
     end
-    -- Broadcast pull idx when RL/assist navigates, so receivers stay in sync.
-    -- Guard prev ~= idx so receivers applying an incoming CRPPULL don't bounce
-    -- it back into the channel.
-    if prev ~= idx and CRP.Comms and CRP.Comms.CanPush and CRP.Comms:CanPush() then
+    if not silent and prev ~= idx and CRP.Comms and CRP.Comms:CanPush() then
         CRP.Comms:PushPull()
     end
 end

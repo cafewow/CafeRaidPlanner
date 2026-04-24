@@ -402,19 +402,6 @@ local function build()
 	buildPullPopup()
 end
 
-local function aggregatedMobs(pull)
-	local byNpc = {}
-	for _, packId in ipairs(pull.packIds or {}) do
-		local pack = CRP.Plan:PackById(packId)
-		if pack and pack.members then
-			for _, m in ipairs(pack.members) do
-				byNpc[m.npcId] = (byNpc[m.npcId] or 0) + (m.count or 1)
-			end
-		end
-	end
-	return byNpc
-end
-
 local function packNames(pull)
 	local names = {}
 	for _, packId in ipairs(pull.packIds or {}) do
