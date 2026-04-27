@@ -53,7 +53,7 @@ local function hasContent(a)
 	if a.kind == "reminder" then
 		return a.text ~= nil and a.text ~= ""
 	end
-	-- spell, item, equip all need a numeric id
+	-- spell, item, equip, kick all need a numeric id
 	return type(a.id) == "number"
 end
 
@@ -73,7 +73,7 @@ local function isMyAssignment(a)
 	if a.kind == "item" or a.kind == "reminder" or a.kind == "equip" then
 		return true
 	end
-	if a.kind == "spell" and a.id then
+	if (a.kind == "spell" or a.kind == "kick") and a.id then
 		local ok = IsSpellKnown and IsSpellKnown(a.id)
 		return ok and true or false
 	end
@@ -105,6 +105,43 @@ local function lookupItem(itemId)
 	return name, icon or ICON_FALLBACK
 end
 
+-- WoW's built-in raid target icon textures, indexed 1..8.
+-- Order matches MARKERS in the web app (data/markers.ts) and the in-game order.
+local MARKER_TEX_INDEX = {
+	star = 1, circle = 2, diamond = 3, triangle = 4,
+	moon = 5, square = 6, cross = 7, skull = 8,
+}
+local MARKER_LABEL = {
+	star = "Star", circle = "Circle", diamond = "Diamond", triangle = "Triangle",
+	moon = "Moon", square = "Square", cross = "Cross", skull = "Skull",
+}
+
+local function markerInline(markerId)
+	local idx = MARKER_TEX_INDEX[markerId]
+	if not idx then return MARKER_LABEL[markerId] or markerId end
+	return string.format(
+		"|TInterface\\TARGETINGFRAME\\UI-RaidTargetingIcon_%d:14:14:0:0|t %s",
+		idx, MARKER_LABEL[markerId] or markerId
+	)
+end
+
+-- Compose the kick row label "<spell> → <target>". Target is either a marker
+-- (rendered with the in-game raid icon) or an npc looked up via Plan:NpcName.
+local function resolveKick(a)
+	local spellName, icon = lookupSpell(a.id)
+	local targetText
+	if a.targetMarker and a.targetMarker ~= "" then
+		targetText = markerInline(a.targetMarker)
+	elseif a.targetNpcId then
+		targetText = (CRP.Plan and CRP.Plan:NpcName(a.targetNpcId))
+			or string.format("npc #%d", a.targetNpcId)
+	end
+	if targetText then
+		return string.format("%s → %s", spellName or string.format("spell #%d", a.id or 0), targetText), icon
+	end
+	return spellName, icon
+end
+
 local function resolveAssignment(a)
 	if a.kind == "reminder" then
 		return a.text or "(reminder)", REMINDER_ICON
@@ -118,6 +155,9 @@ local function resolveAssignment(a)
 	end
 	if a.kind == "item" then
 		return lookupItem(a.id)
+	end
+	if a.kind == "kick" then
+		return resolveKick(a)
 	end
 	return lookupSpell(a.id)
 end
