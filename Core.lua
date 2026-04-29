@@ -13,6 +13,7 @@ local defaults = {
         currentPullIdx = 1,
         autoAdvance = true,         -- advance current pull when all required mobs die
         autoApplyIncomingPlan = false, -- true → skip receive prompt and apply silently
+        autoShow = true,            -- open window on raid zone-in and after importing a pushed plan
         trackerState = {            -- persisted kill progress, keyed by instance lockout
             lockoutKey = nil,
             pullUid = nil,
@@ -45,6 +46,7 @@ function Core:OnInitialize()
     eventFrame = CreateFrame("Frame", "CafeRaidPlannerEventFrame")
     eventFrame:RegisterEvent("GET_ITEM_INFO_RECEIVED")
     eventFrame:RegisterEvent("COMBAT_LOG_EVENT_UNFILTERED")
+    eventFrame:RegisterEvent("PLAYER_ENTERING_WORLD")
     eventFrame:SetScript("OnEvent", function(_, event, arg1, arg2)
         if event == "GET_ITEM_INFO_RECEIVED" then
             if CRP.ui and CRP.ui.Window then
@@ -53,6 +55,13 @@ function Core:OnInitialize()
         elseif event == "COMBAT_LOG_EVENT_UNFILTERED" then
             if CRP.Tracker and CRP.Tracker.OnCombatLog then
                 CRP.Tracker:OnCombatLog()
+            end
+        elseif event == "PLAYER_ENTERING_WORLD" then
+            if CRP.db.global.autoShow then
+                local inInstance, instanceType = IsInInstance()
+                if inInstance and instanceType == "raid" and CRP.ui and CRP.ui.Window then
+                    CRP.ui.Window:Show()
+                end
             end
         end
     end)
@@ -95,6 +104,12 @@ function Core:SlashHandler(input)
     elseif input == "autoimport off" then
         CRP.db.global.autoApplyIncomingPlan = false
         self:Print("Auto-import incoming plans: off (will prompt).")
+    elseif input == "autoshow on" or input == "autoshow" then
+        CRP.db.global.autoShow = true
+        self:Print("Auto-show window on raid entry / plan import: on.")
+    elseif input == "autoshow off" then
+        CRP.db.global.autoShow = false
+        self:Print("Auto-show window on raid entry / plan import: off.")
     elseif input == "push" then
         local ok, err = CRP.Comms:PushPlan()
         if not ok and err then self:Print("Push failed: " .. err) end
@@ -109,6 +124,6 @@ function Core:SlashHandler(input)
         if CRP.ui.Window then CRP.ui.Window:Refresh() end
         self:Print("View mode: " .. input .. ".")
     else
-        self:Print("Usage: /crp [show | import | next | prev | reset | clearkills | push | auto on|off | autoimport on|off | my | raid]")
+        self:Print("Usage: /crp [show | import | next | prev | reset | clearkills | push | auto on|off | autoimport on|off | autoshow on|off | my | raid]")
     end
 end

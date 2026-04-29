@@ -120,6 +120,9 @@ function Comms:_ApplyIncoming(envelope, currentPullIdx, sender)
         stripRealm(sender or "?"),
         #(envelope.preset.pulls or {}),
         #(envelope.packs or {})))
+    if CRP.db.global.autoShow and CRP.ui and CRP.ui.Window then
+        CRP.ui.Window:Show()
+    end
 end
 
 -- ---------------------------------------------------------------------------
