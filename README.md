@@ -30,6 +30,8 @@ path into the AddOns folder.
 - `/crp my` / `/crp raid` — switch between the minimal per-player view and
   the full raid leader view.
 - `/crp auto on|off` — toggle combat-log-driven auto-advance.
+- `/crp autoshow on|off` — toggle auto-opening the window when you zone
+  into a raid or when an incoming pushed plan is imported (default on).
 - `/crp clearkills` — wipe tracked kill progress without touching the plan.
 - `/crp reset` — wipe the imported plan entirely.
 - `/crp debug on|off` — log each UNIT_DIED GUID (for troubleshooting

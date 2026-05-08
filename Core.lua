@@ -14,10 +14,10 @@ local defaults = {
         autoAdvance = true,         -- advance current pull when all required mobs die
         autoApplyIncomingPlan = false, -- true → skip receive prompt and apply silently
         autoShow = true,            -- open window on raid zone-in and after importing a pushed plan
+        killLookahead = 3,          -- greedy matcher window: kills overflow into the next N pulls
         trackerState = {            -- persisted kill progress, keyed by instance lockout
             lockoutKey = nil,
-            pullUid = nil,
-            killsByNpc = {},
+            killsByPullUid = {},
         },
     },
     char = {

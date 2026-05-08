@@ -45,17 +45,35 @@ end
 -- when applying a remote CRPPULL/CRPPLAN so N assists don't all echo the same
 -- idx back into the channel after every navigation.
 function Plan:SetCurrentPullIdx(idx, silent)
-    local n = #self:Pulls()
+    local pulls = self:Pulls()
+    local n = #pulls
     if n == 0 then
         CRP.db.global.currentPullIdx = 1
         return
     end
     if idx < 1 then idx = 1 end
     if idx > n then idx = n end
-    local prev = CRP.db.global.currentPullIdx
+    local prev = CRP.db.global.currentPullIdx or 1
     CRP.db.global.currentPullIdx = idx
-    -- Intentionally don't reset tracker state: kills are stored per-pull-uid,
-    -- so navigating between pulls should just show each pull's own progress.
+
+    -- Cursor is the source of truth for completion. Forward jumps stamp every
+    -- pull we just left as fully killed (pulls in [prev, idx-1]); backward
+    -- jumps clear the destination plus any forward-filled pulls in between
+    -- (pulls in [idx, prev-1]) so they're a fresh slate to redo. The previous
+    -- current pull is left untouched on backward nav — its kill state reflects
+    -- what actually happened while we were on it.
+    if CRP.Tracker and idx ~= prev then
+        if idx > prev then
+            for i = prev, idx - 1 do
+                CRP.Tracker:FillPull(pulls[i])
+            end
+        else
+            for i = idx, prev - 1 do
+                CRP.Tracker:ClearPull(pulls[i])
+            end
+        end
+    end
+
     if CRP.ui and CRP.ui.Window and CRP.ui.Window.Refresh then
         CRP.ui.Window:Refresh()
     end

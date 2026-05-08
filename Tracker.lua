@@ -20,10 +20,12 @@ local function ensureState()
         CRP.db.global.trackerState = s
     end
     if type(s.killsByPullUid) ~= "table" then s.killsByPullUid = {} end
-    -- Migration from earlier shape (flat killsByNpc + pullUid). Drop silently.
-    if s.killsByNpc ~= nil or s.pullUid ~= nil then
+    -- Migration from earlier shape (flat killsByNpc + pullUid, or short-lived
+    -- skippedPulls table). Drop silently.
+    if s.killsByNpc ~= nil or s.pullUid ~= nil or s.skippedPulls ~= nil then
         s.killsByNpc = nil
         s.pullUid = nil
+        s.skippedPulls = nil
     end
     return s
 end
@@ -100,6 +102,54 @@ function Tracker:Clear()
     wipe(processedGUIDs)
 end
 
+-- Stamp every required mob in `pull` to its required count. Used by Plan
+-- navigation: forward jumps fill the pulls we left behind ("cursor moved past
+-- this, treat it as done"). Idempotent — re-filling an already-full pull is a
+-- no-op.
+function Tracker:FillPull(pull)
+    if not pull then return end
+    local reqs = CRP.Plan:MobRequirementsForPull(pull)
+    if not next(reqs) then return end
+    local kills = killsFor(pull.id)
+    for npcId, need in pairs(reqs) do
+        kills[npcId] = need
+    end
+end
+
+-- Drop all kills for a pull. Used by backward navigation so the destination
+-- and any forward-filled pulls in between get a fresh slate to redo.
+function Tracker:ClearPull(pull)
+    if not pull then return end
+    ensureState().killsByPullUid[pull.id] = nil
+end
+
+-- Greedy lookahead: find the earliest pull within a small window starting at
+-- the current pull whose requirement for npcId isn't satisfied yet. Handles
+-- patrols and out-of-order pulls — a pull-2 patrol that wanders into pull 1
+-- lands in pull 1 if pull 1 still needs that npcId, otherwise spills forward.
+-- Earlier pulls don't need to be considered: forward navigation auto-fills
+-- them, so they're at requirement and the matcher would skip past anyway.
+local function findPullForKill(npcId)
+    local pulls = CRP.Plan:Pulls()
+    if #pulls == 0 then return nil end
+    local idx = CRP.Plan:CurrentPullIdx()
+    local lookahead = CRP.db.global.killLookahead or 3
+    local last = math.min(#pulls, idx + lookahead)
+    local state = ensureState()
+    for i = idx, last do
+        local pull = pulls[i]
+        if pull then
+            local need = CRP.Plan:MobRequirementsForPull(pull)[npcId]
+            if need then
+                local bucket = state.killsByPullUid[pull.id]
+                local got = (bucket and bucket[npcId]) or 0
+                if got < need then return pull end
+            end
+        end
+    end
+    return nil
+end
+
 local function onMobDied(destGUID)
     if not destGUID or processedGUIDs[destGUID] then return end
     processedGUIDs[destGUID] = true
@@ -128,11 +178,8 @@ local function onMobDied(destGUID)
     end
     if lockoutKey then state.lockoutKey = lockoutKey end
 
-    local pull = CRP.Plan:CurrentPull()
+    local pull = findPullForKill(npcId)
     if not pull then return end
-
-    local reqs = Tracker:Requirements()
-    if not reqs[npcId] then return end
 
     local kills = killsFor(pull.id)
     kills[npcId] = (kills[npcId] or 0) + 1
