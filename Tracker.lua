@@ -70,20 +70,76 @@ local function instanceKeyFromGUID(guid)
     return serverID .. "-" .. zoneUID
 end
 
-function Tracker:Requirements()
+function Tracker:Slots()
     local pull = CRP.Plan:CurrentPull()
     if not pull then return {} end
-    return CRP.Plan:MobRequirementsForPull(pull)
+    return CRP.Plan:SlotsForPull(pull)
+end
+
+-- Size of a slot's accepts set. Fixed slots = 1; pool slots = N. Used to order
+-- greedy assignment fixed-first so the more-specific slot consumes its kills
+-- before a pool slot would absorb them.
+local function acceptsSize(slot)
+    local n = 0
+    for _ in pairs(slot.accepts) do n = n + 1 end
+    return n
+end
+
+-- Greedy assignment of `kills` ({[npcId]=count}) into `slots`. Returns a list
+-- of per-slot kills consumed (parallel to `slots`), summing kills attributed
+-- to each slot. Fixed-first ordering minimizes false-unsatisfied results when
+-- the same npcId is referenced by both a fixed and a pool slot in the pull.
+local function assignKillsToSlots(slots, kills)
+    local remaining = {}
+    for nid, c in pairs(kills) do remaining[nid] = c end
+    -- Precompute accepts sizes once; the sort comparator runs O(n log n) times
+    -- and recomputing per call would walk each slot's accepts repeatedly.
+    local sizes, order = {}, {}
+    for i = 1, #slots do
+        sizes[i] = acceptsSize(slots[i])
+        order[i] = i
+    end
+    table.sort(order, function(a, b) return sizes[a] < sizes[b] end)
+    local consumed = {}
+    for i = 1, #slots do consumed[i] = 0 end
+    for _, i in ipairs(order) do
+        local s = slots[i]
+        local need = s.count
+        for nid in pairs(s.accepts) do
+            if need <= 0 then break end
+            local got = remaining[nid] or 0
+            local take = math.min(got, need)
+            remaining[nid] = got - take
+            need = need - take
+            consumed[i] = consumed[i] + take
+        end
+    end
+    return consumed
+end
+
+-- Pull-specific completion check. Pure — no dependency on the cursor. Returns
+-- false for pulls with no slots (empty / all-unresolved packs) so they don't
+-- masquerade as "complete".
+function Tracker:IsPullCompleteFor(pull)
+    if not pull then return false end
+    local slots = CRP.Plan:SlotsForPull(pull)
+    if #slots == 0 then return false end
+    local bucket = ensureState().killsByPullUid[pull.id] or {}
+    local consumed = assignKillsToSlots(slots, bucket)
+    for i, s in ipairs(slots) do
+        if consumed[i] < s.count then return false end
+    end
+    return true
 end
 
 function Tracker:IsPullComplete()
-    local reqs = self:Requirements()
-    if not next(reqs) then return false end
-    local kills = self:Kills()
-    for npcId, need in pairs(reqs) do
-        if (kills[npcId] or 0) < need then return false end
-    end
-    return true
+    return self:IsPullCompleteFor(CRP.Plan:CurrentPull())
+end
+
+-- Exposed so UI.lua's progress display can derive per-slot consumed counts
+-- without duplicating the greedy assignment logic.
+function Tracker:AssignKillsToSlots(slots, kills)
+    return assignKillsToSlots(slots, kills)
 end
 
 -- Wipe only the current pull's kills.
@@ -108,12 +164,18 @@ end
 -- no-op.
 function Tracker:FillPull(pull)
     if not pull then return end
-    local reqs = CRP.Plan:MobRequirementsForPull(pull)
-    if not next(reqs) then return end
-    local kills = killsFor(pull.id)
-    for npcId, need in pairs(reqs) do
-        kills[npcId] = need
+    local slots = CRP.Plan:SlotsForPull(pull)
+    if #slots == 0 then return end
+    -- Overwrite the pull's kills wholesale: for each slot, deposit `count`
+    -- against the first npcId in its accepts set. Identity of the deposit
+    -- doesn't matter for completion — the matcher only checks per-slot totals.
+    local newKills = {}
+    for _, s in ipairs(slots) do
+        local first
+        for nid in pairs(s.accepts) do first = nid; break end
+        if first then newKills[first] = (newKills[first] or 0) + s.count end
     end
+    ensureState().killsByPullUid[pull.id] = newKills
 end
 
 -- Drop all kills for a pull. Used by backward navigation so the destination
@@ -139,11 +201,24 @@ local function findPullForKill(npcId)
     for i = idx, last do
         local pull = pulls[i]
         if pull then
-            local need = CRP.Plan:MobRequirementsForPull(pull)[npcId]
-            if need then
-                local bucket = state.killsByPullUid[pull.id]
-                local got = (bucket and bucket[npcId]) or 0
-                if got < need then return pull end
+            local slots = CRP.Plan:SlotsForPull(pull)
+            -- Cheap filter: skip pulls that don't accept this npcId in any slot.
+            local accepted = false
+            for _, s in ipairs(slots) do
+                if s.accepts[npcId] then accepted = true; break end
+            end
+            if accepted then
+                local bucket = state.killsByPullUid[pull.id] or {}
+                local consumed = assignKillsToSlots(slots, bucket)
+                -- Pull is a candidate if at least one slot accepting npcId is
+                -- not yet fully consumed. Greedy fixed-first ordering means a
+                -- fixed slot is preferred over a pool slot when both could
+                -- accept this npcId.
+                for i2, s in ipairs(slots) do
+                    if s.accepts[npcId] and consumed[i2] < s.count then
+                        return pull
+                    end
+                end
             end
         end
     end
@@ -189,12 +264,32 @@ local function onMobDied(destGUID)
     end
 
     if Tracker:IsPullComplete() and CRP.db.global.autoAdvance ~= false then
-        local n = #CRP.Plan:Pulls()
+        local pulls = CRP.Plan:Pulls()
+        local n = #pulls
         local idx = CRP.Plan:CurrentPullIdx()
-        if idx < n then
-            print("|cff38c24fCafeRaidPlanner:|r pull complete — advancing to pull " .. (idx + 1))
-            CRP.Plan:Next()
-        else
+        -- Probe forward without side effects to find the first incomplete pull
+        -- (or the final pull if all remaining are complete). Overflow kills can
+        -- have pre-filled multiple later pulls; we want to land on the first
+        -- one that still needs work. Single SetCurrentPullIdx at the end so we
+        -- emit at most one CRPPULL broadcast and one Refresh, even on multi-pull skips.
+        local target = idx
+        while target < n do
+            local probe = target + 1
+            if Tracker:IsPullCompleteFor(pulls[probe]) then
+                target = probe
+            else
+                target = probe
+                break
+            end
+        end
+        if target > idx then
+            CRP.Plan:SetCurrentPullIdx(target)
+            if target == n and Tracker:IsPullComplete() then
+                print("|cff38c24fCafeRaidPlanner:|r final pull complete.")
+            else
+                print("|cff38c24fCafeRaidPlanner:|r pull complete — advancing to pull " .. target)
+            end
+        elseif target == n then
             print("|cff38c24fCafeRaidPlanner:|r final pull complete.")
         end
     end

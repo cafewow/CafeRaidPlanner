@@ -3,6 +3,28 @@ local _, CRP = ...
 local Plan = {}
 CRP.Plan = Plan
 
+-- Dedupe of pull-pack unresolved-warnings within the current plan. Cleared on
+-- Plan:Import / Plan:Clear since pull and pack ids regenerate per plan.
+local warnedUnresolved = {}
+
+-- Lazy { [packId] = pack } lookup map. PackById is called once per pack per
+-- pull on every Window:Refresh, so the O(packs·packsPerPull) scan over a 30-
+-- pack plan was the heaviest part of a refresh. Cleared whenever the plan
+-- changes; built on first access via ensurePackIndex().
+local packIndex = nil
+local function ensurePackIndex()
+    if packIndex then return packIndex end
+    local p = Plan:Current()
+    packIndex = {}
+    if p and p.packs then
+        for _, pack in ipairs(p.packs) do
+            packIndex[pack.id] = pack
+        end
+    end
+    return packIndex
+end
+local function invalidatePackIndex() packIndex = nil end
+
 -- Returns the current plan envelope {v, preset, packs} or nil if none imported.
 function Plan:Current()
     return CRP.db and CRP.db.global and CRP.db.global.plan
@@ -12,6 +34,8 @@ function Plan:Import(envelope)
     if type(envelope) ~= "table" or type(envelope.preset) ~= "table" then return false end
     CRP.db.global.plan = envelope
     CRP.db.global.currentPullIdx = 1
+    wipe(warnedUnresolved)
+    invalidatePackIndex()
     if CRP.Tracker and CRP.Tracker.Clear then
         CRP.Tracker:Clear()     -- new plan → pull uids changed, prior kills meaningless
     end
@@ -21,6 +45,8 @@ end
 function Plan:Clear()
     CRP.db.global.plan = nil
     CRP.db.global.currentPullIdx = 1
+    wipe(warnedUnresolved)
+    invalidatePackIndex()
     if CRP.Tracker and CRP.Tracker.Clear then
         CRP.Tracker:Clear()
     end
@@ -92,12 +118,7 @@ end
 
 -- Look up a pack by id in the current plan.
 function Plan:PackById(packId)
-    local p = self:Current()
-    if not p then return nil end
-    for _, pack in ipairs(p.packs) do
-        if pack.id == packId then return pack end
-    end
-    return nil
+    return ensurePackIndex()[packId]
 end
 
 -- Runtime cache of npcId → name enriched from combat log destName. Useful when
@@ -121,19 +142,50 @@ function Plan:NpcName(npcId)
     return nameCache[npcId]
 end
 
--- Aggregate mob counts across all packs in the given pull. Bosses are ordinary
--- packs (with a slug + icon) whose members list contains the boss npcId, so
--- this loop captures them naturally — no special case needed.
-function Plan:MobRequirementsForPull(pull)
-    local out = {}
-    if not pull then return out end
+-- Return an ordered list of slot requirements for the pull. Each slot is
+-- { accepts = {[npcId]=true, ...}, count = N, variable = true|nil }.
+-- Fixed packs contribute one slot per member (1-element accepts). Variable
+-- packs contribute one pool slot per pack whose accepts is the full pool and
+-- count is the pack's total. Bosses are ordinary packs (slug + icon) whose
+-- members list contains the boss npcId, captured naturally as a fixed slot.
+function Plan:SlotsForPull(pull)
+    local slots = {}
+    if not pull then return slots end
     for _, packId in ipairs(pull.packIds or {}) do
         local pack = self:PackById(packId)
-        if pack and pack.members then
+        local empty = pack and (not pack.members or #pack.members == 0)
+        if not pack or empty then
+            -- A pull that references a missing/empty pack will silently render
+            -- fewer mobs than authored and (if it's the only pack) can never
+            -- reach IsPullComplete. Print once per (pull, packId) so the user
+            -- sees the broken reference without spamming on every refresh.
+            local key = tostring(pull.id) .. ":" .. tostring(packId)
+            if not warnedUnresolved[key] then
+                warnedUnresolved[key] = true
+                local pullName = (pull.name and pull.name ~= "" and pull.name) or ("#" .. tostring(pull.id))
+                if pack then
+                    print(("|cffff9933CRP:|r pull '%s' references pack #%d which has no mobs."):format(pullName, packId))
+                else
+                    print(("|cffff9933CRP:|r pull '%s' references missing pack #%d — re-import the plan."):format(pullName, packId))
+                end
+            end
+        elseif pack.variable then
+            local accepts, total = {}, 0
             for _, m in ipairs(pack.members) do
-                out[m.npcId] = (out[m.npcId] or 0) + (m.count or 1)
+                accepts[m.npcId] = true
+                total = total + (m.count or 1)
+            end
+            if total > 0 then
+                slots[#slots + 1] = { accepts = accepts, count = total, variable = true }
+            end
+        else
+            for _, m in ipairs(pack.members) do
+                slots[#slots + 1] = {
+                    accepts = { [m.npcId] = true },
+                    count = m.count or 1,
+                }
             end
         end
     end
-    return out
+    return slots
 end

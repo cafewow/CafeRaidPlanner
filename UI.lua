@@ -451,19 +451,57 @@ local function packNames(pull)
 	return table.concat(names, ", ")
 end
 
--- Return an ordered list of {npcId, required, killed} for the current pull's mobs.
+-- Return an ordered list of progress rows for the current pull. Each row is
+-- either { kind="fixed", npcId, need, killed } (single-mob requirement) or
+-- { kind="pool", npcIds=[...], need, killed, sortKey } (variable pack).
+-- Fixed entries with the same npcId across packs are coalesced.
 local function progressEntries(pull)
-	local entries = {}
-	local reqs = CRP.Plan:MobRequirementsForPull(pull)
+	local slots = CRP.Plan:SlotsForPull(pull)
+	if #slots == 0 then return {} end
 	local kills = (CRP.Tracker and CRP.Tracker:Kills()) or {}
-	for npcId, need in pairs(reqs) do
-		entries[#entries + 1] = { npcId = npcId, need = need, killed = kills[npcId] or 0 }
+	-- Use the matcher's greedy assignment so displayed killed/need matches what
+	-- the matcher considers satisfied — otherwise overlapping fixed+pool slots
+	-- can show numbers that double-count a kill.
+	local consumed = CRP.Tracker:AssignKillsToSlots(slots, kills)
+	-- Aggregate fixed slots by npcId so multi-pack pulls show one row per mob.
+	local fixedByNpc = {}
+	local poolEntries = {}
+	for i, s in ipairs(slots) do
+		if s.variable then
+			local npcIds = {}
+			for nid in pairs(s.accepts) do npcIds[#npcIds + 1] = nid end
+			table.sort(npcIds)
+			poolEntries[#poolEntries + 1] = {
+				kind = "pool",
+				npcIds = npcIds,
+				need = s.count,
+				killed = consumed[i],
+				sortKey = npcIds[1] or 0,
+			}
+		else
+			local nid
+			for n in pairs(s.accepts) do nid = n; break end
+			if nid then
+				local row = fixedByNpc[nid]
+				if not row then
+					row = { kind = "fixed", npcId = nid, need = 0, killed = 0 }
+					fixedByNpc[nid] = row
+				end
+				row.need = row.need + s.count
+				row.killed = row.killed + consumed[i]
+			end
+		end
 	end
+	local entries = {}
+	for _, row in pairs(fixedByNpc) do entries[#entries + 1] = row end
+	for _, row in ipairs(poolEntries) do entries[#entries + 1] = row end
 	table.sort(entries, function(a, b)
 		if a.killed ~= b.killed then
 			return a.killed > b.killed
 		end
-		return a.npcId < b.npcId
+		local ak = a.kind == "pool" and a.sortKey or a.npcId
+		local bk = b.kind == "pool" and b.sortKey or b.npcId
+		return ak < bk
 	end)
 	return entries
 end
@@ -683,7 +721,16 @@ function Window:Refresh()
 			line:SetPoint("RIGHT", frame, "RIGHT", -16, 0)
 			local done = e.killed >= e.need
 			local color = done and "|cff7fff7f" or "|cffffffff"
-			local label = CRP.Plan:NpcName(e.npcId) or ("npc #" .. e.npcId)
+			local label
+			if e.kind == "pool" then
+				local names = {}
+				for _, nid in ipairs(e.npcIds) do
+					names[#names + 1] = CRP.Plan:NpcName(nid) or ("#" .. nid)
+				end
+				label = "pool: " .. table.concat(names, ", ")
+			else
+				label = CRP.Plan:NpcName(e.npcId) or ("npc #" .. e.npcId)
+			end
 			line:SetText(string.format("  %s%d/%d|r  %s", color, e.killed, e.need, label))
 			line:Show()
 			y = y - 14
