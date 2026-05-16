@@ -451,6 +451,60 @@ local function packNames(pull)
 	return table.concat(names, ", ")
 end
 
+-- Compact mob summary for the upcoming-pulls strip. Pull names are usually
+-- meaningless ("Pull 7"), so we show what's actually in the pull. NPC names
+-- are trimmed to the last word ("Nether Scryer" → "Scryer", "Apprentice Star
+-- Scryer" → "Scryer") so several entries fit in the row.
+local function shortNpcName(name)
+	if not name or name == "" then return nil end
+	-- Match the last whitespace-delimited token. %S+ at end of string.
+	return name:match("(%S+)%s*$") or name
+end
+
+local function pullMobSummary(pull)
+	if not pull then return "" end
+	local counts, order = {}, {}
+	for _, packId in ipairs(pull.packIds or {}) do
+		local pack = CRP.Plan:PackById(packId)
+		if pack and pack.members then
+			for _, m in ipairs(pack.members) do
+				local short = shortNpcName(CRP.Plan:NpcName(m.npcId)) or ("#" .. m.npcId)
+				if not counts[short] then
+					counts[short] = 0
+					order[#order + 1] = short
+				end
+				counts[short] = counts[short] + (m.count or 1)
+			end
+		end
+	end
+	if #order == 0 then return pull.name or "" end
+	table.sort(order, function(a, b)
+		if counts[a] ~= counts[b] then return counts[a] > counts[b] end
+		return a < b
+	end)
+	local parts = {}
+	for _, name in ipairs(order) do
+		parts[#parts + 1] = counts[name] .. "× " .. name
+	end
+	return table.concat(parts, ", ")
+end
+
+-- Mirror the web UI: if any pack in the pull is a boss (has a slug), show the
+-- boss name(s) instead of the user-set pull name. Bosses are the meaningful
+-- label for a pull; "Pull 7" buried among trash is less informative than
+-- "Hydross + Lurker" when you're skimming the list.
+local function pullDisplayName(pull)
+	local bossNames = {}
+	for _, packId in ipairs(pull.packIds or {}) do
+		local pack = CRP.Plan:PackById(packId)
+		if pack and pack.slug then
+			bossNames[#bossNames + 1] = pack.name or pack.slug
+		end
+	end
+	if #bossNames > 0 then return table.concat(bossNames, " + ") end
+	return pull.name or "Pull"
+end
+
 -- Return an ordered list of progress rows for the current pull. Each row is
 -- either { kind="fixed", npcId, need, killed } (single-mob requirement) or
 -- { kind="pool", npcIds=[...], need, killed, sortKey } (variable pack).
@@ -579,7 +633,7 @@ local function updateUpcoming(curIdx, pulls, my)
 			row:Hide()
 		else
 			row.num:SetText(tostring(upIdx))
-			row.name:SetText(pull.name or "")
+			row.name:SetText(pullMobSummary(pull))
 
 			local rel = {}
 			for _, a in ipairs(pull.assignments or {}) do
@@ -914,7 +968,7 @@ function refreshPullPopupRows()
 			pullPopup:Hide()
 		end)
 		local prefix = (i == currentIdx) and "|cffffd54a▶|r " or "   "
-		row.text:SetText(string.format("%s%d. %s", prefix, i, pull.name or "Pull"))
+		row.text:SetText(string.format("%s%d. %s", prefix, i, pullDisplayName(pull)))
 		row:Show()
 	end
 	for i = #pulls + 1, #pullPopupRowPool do
