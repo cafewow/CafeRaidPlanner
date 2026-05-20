@@ -57,6 +57,14 @@ accordingly, so the numbers stay consistent with where you actually are.
 Kill progress survives a `/reload` mid-raid. A new lockout (after a reset
 and zone back in) wipes everything on the next kill.
 
+## Where the plans come from
+
+Plans are built in the [web planner](https://cafewow.github.io/CafeRaidPlanner-Web/) —
+drop pack markers on the raid map, group them into pulls, assign cooldowns
+and CCs, then export a share string. The addon imports that string.
+
+![Planner](docs/planner.png)
+
 ## Slash commands
 
 | Command | What it does |
