@@ -1,7 +1,5 @@
 ![CafeRaidPlanner](docs/logo.png)
 
-# CafeRaidPlanner
-
 A WoW Classic addon for running planned raid pulls. You build the plan in
 the [web planner](https://cafewow.github.io/CafeRaidPlanner-Web/), paste the
 share string into the addon, and the rest of the raid sees pull-by-pull what
@@ -67,19 +65,19 @@ and CCs, then export a share string. The addon imports that string.
 
 ## Slash commands
 
-| Command | What it does |
-|---|---|
-| `/crp` | toggle the window |
-| `/crp import` | open the paste-string dialog |
-| `/crp next` / `/crp prev` | navigate pulls manually |
-| `/crp my` / `/crp raid` | switch view mode |
-| `/crp push` | broadcast plan + current pull to the raid |
-| `/crp auto on\|off` | combat-log auto-advance (default on) |
-| `/crp autoshow on\|off` | open window on raid zone-in / incoming plan (default on) |
-| `/crp autoimport on\|off` | skip the import prompt for pushed plans (default off) |
-| `/crp clearkills` | reset tracked kills without dropping the plan |
-| `/crp reset` | drop the plan entirely |
-| `/crp debug on\|off` | log each UNIT_DIED GUID, for lockout troubleshooting |
+| Command                   | What it does                                             |
+| ------------------------- | -------------------------------------------------------- |
+| `/crp`                    | toggle the window                                        |
+| `/crp import`             | open the paste-string dialog                             |
+| `/crp next` / `/crp prev` | navigate pulls manually                                  |
+| `/crp my` / `/crp raid`   | switch view mode                                         |
+| `/crp push`               | broadcast plan + current pull to the raid                |
+| `/crp auto on\|off`       | combat-log auto-advance (default on)                     |
+| `/crp autoshow on\|off`   | open window on raid zone-in / incoming plan (default on) |
+| `/crp autoimport on\|off` | skip the import prompt for pushed plans (default off)    |
+| `/crp clearkills`         | reset tracked kills without dropping the plan            |
+| `/crp reset`              | drop the plan entirely                                   |
+| `/crp debug on\|off`      | log each UNIT_DIED GUID, for lockout troubleshooting     |
 
 ## Related
 
