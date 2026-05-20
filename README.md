@@ -1,77 +1,79 @@
-# CafeRaidPlanner (addon)
+![CafeRaidPlanner](../logo.png)
 
-WoW addon that consumes a plan exported from the
-[CafeRaidPlanner web planner](https://github.com/cafewow/CafeRaidPlanner-Web),
-tracks pull progress via the combat log, and shows the raid leader /
-each player exactly what's expected on the current pull.
+# CafeRaidPlanner
 
-Supports TBC Classic (Interface 20504) and retail (120001/120005).
+A WoW Classic addon for running planned raid pulls. You build the plan in
+the [web planner](https://cafewow.github.io/CafeRaidPlanner-Web/), paste the
+share string into the addon, and the rest of the raid sees pull-by-pull what
+they're supposed to do.
+
+It hooks the combat log to track kills, auto-advances through the pull list
+as packs die, and shows each player only what's relevant to them.
+
+Tested on Classic Era / Anniversary; should load anywhere that accepts a BCC
+TOC (`Interface 20504`).
 
 ## Install
 
-Clone or download this repo into your AddOns folder:
+Easiest way is [CurseForge](https://www.curseforge.com/wow/addons) — search
+for "CafeRaidPlanner". Or grab a release zip from this repo and drop the
+`CafeRaidPlanner` folder into your AddOns directory.
 
-```
-World of Warcraft/<client>/Interface/AddOns/CafeRaidPlanner/
-```
+## What you get
 
-Client folder depends on version: `_classic_era_`, `_bcc_`, `_anniversary_`,
-`_retail_`, etc.
+For the raid leader, the full window:
 
-On Windows + WSL, `mklink /D` from an elevated cmd.exe can symlink a WSL
-path into the AddOns folder.
+![Raid view](../raid_view.png)
 
-## Usage
+- Pull notes and reminders straight from the plan
+- Live kill progress per mob, with auto-advance when the pull is done
+- All assignments laid out as a table — cooldowns, kicks/CC, equip swaps
+- Preview of the next few pulls
 
-- `/crp` — toggle the planner window.
-- `/crp import` — open the paste-string dialog for the `crp1.…` string
-  you get from the web planner's Share dialog.
-- `/crp next` / `/crp prev` — advance through pulls manually.
-- `/crp my` / `/crp raid` — switch between the minimal per-player view and
-  the full raid leader view.
-- `/crp auto on|off` — toggle combat-log-driven auto-advance.
-- `/crp autoshow on|off` — toggle auto-opening the window when you zone
-  into a raid or when an incoming pushed plan is imported (default on).
-- `/crp clearkills` — wipe tracked kill progress without touching the plan.
-- `/crp reset` — wipe the imported plan entirely.
-- `/crp debug on|off` — log each UNIT_DIED GUID (for troubleshooting
-  lockout detection).
+For everyone else, the same plan filtered down to their character:
 
-## How it works
+![Personal view](../personal_view.png)
 
-- **Import**: `crp1.<base64url(deflate(JSON))>`. `LibDeflate` unpacks the
-  deflate, rxi's `json.lua` parses. Result is `{preset, packs, bosses,
-  npcNames}` stored in AceDB.
-- **Tracker** (`Tracker.lua`): hooks `COMBAT_LOG_EVENT_UNFILTERED`, filters
-  `UNIT_DIED` / `PARTY_KILL`, extracts `npcId` from Creature GUIDs, and
-  matches against the current pull's aggregated kill requirements (packs
-  + boss). When the requirements are met and `autoAdvance` is on, the
-  current pull advances.
-- **Lockout** persistence: kill state is keyed by `serverID + zoneUID`
-  from the GUID — the same fingerprint Nova Instance Tracker uses. Reloads
-  mid-raid keep progress; a new lockout (after reset + reenter) wipes on
-  the first kill.
-- **My view**: filters assignments to those whose `player` matches the
-  local character (realm-stripped, case-insensitive), plus unassigned
-  items/reminders/equips and unassigned spells that `IsSpellKnown` returns
-  true for.
+Only assignments addressed to you show up. Spells and CC are filtered by
+what your class actually knows, so a warrior doesn't see Polymorph and a
+rogue doesn't see Innervate. Toggle with the **My view** / **Raid view**
+button in the top-right corner. The window remembers its size and position
+separately per mode.
 
-## Layout
+## Using it
 
-```
-CafeRaidPlanner/
-├── CafeRaidPlanner-BCC.toc
-├── CafeRaidPlanner-Mainline.toc
-├── init.lua           namespace + cross-version shims
-├── Core.lua           AceAddon, AceDB, slash, event frame
-├── Share.lua          decode crp1.… strings
-├── Plan.lua           AceDB-backed plan/pull CRUD
-├── Tracker.lua        combat-log kill tracker, auto-advance
-├── Comms.lua          raid-sync scaffold (phase C — stub only)
-├── UI.lua             main window, pull popup, import dialog
-└── libs/              vendored Ace3, LibDeflate, LibDataBroker, rxi-json
-```
+1. Build a plan on the [web planner](https://cafewow.github.io/CafeRaidPlanner-Web/),
+   hit Share, copy the `crp1.…` string.
+2. In-game, type `/crp import` and paste it in.
+3. Open the window with `/crp` (or it'll pop open when you zone into a raid).
+4. As raid leader, hit **Push** in the addon to broadcast the plan + current
+   pull index to everyone else in the raid. They'll get a prompt to import.
 
-## Status
+The current pull advances on its own as packs die. If you go off-script
+(skipped a pull, came back to redo one) you can jump to any pull from the
+counter dropdown — the tracker fills in or clears intermediate kill state
+accordingly, so the numbers stay consistent with where you actually are.
 
-v0.1.0-dev. Planning + tracker working; Comms scaffolded but not live.
+Kill progress survives a `/reload` mid-raid. A new lockout (after a reset
+and zone back in) wipes everything on the next kill.
+
+## Slash commands
+
+| Command | What it does |
+|---|---|
+| `/crp` | toggle the window |
+| `/crp import` | open the paste-string dialog |
+| `/crp next` / `/crp prev` | navigate pulls manually |
+| `/crp my` / `/crp raid` | switch view mode |
+| `/crp push` | broadcast plan + current pull to the raid |
+| `/crp auto on\|off` | combat-log auto-advance (default on) |
+| `/crp autoshow on\|off` | open window on raid zone-in / incoming plan (default on) |
+| `/crp autoimport on\|off` | skip the import prompt for pushed plans (default off) |
+| `/crp clearkills` | reset tracked kills without dropping the plan |
+| `/crp reset` | drop the plan entirely |
+| `/crp debug on\|off` | log each UNIT_DIED GUID, for lockout troubleshooting |
+
+## Related
+
+- Web planner: [cafewow/CafeRaidPlanner-Web](https://github.com/cafewow/CafeRaidPlanner-Web)
+- Architecture notes and dev docs: `PROJECT.md` in the repo root
