@@ -1,4 +1,4 @@
-![CafeRaidPlanner](../logo.png)
+![CafeRaidPlanner](docs/logo.png)
 
 # CafeRaidPlanner
 
@@ -23,7 +23,7 @@ for "CafeRaidPlanner". Or grab a release zip from this repo and drop the
 
 For the raid leader, the full window:
 
-![Raid view](../raid_view.png)
+![Raid view](docs/raid_view.png)
 
 - Pull notes and reminders straight from the plan
 - Live kill progress per mob, with auto-advance when the pull is done
@@ -32,7 +32,7 @@ For the raid leader, the full window:
 
 For everyone else, the same plan filtered down to their character:
 
-![Personal view](../personal_view.png)
+![Personal view](docs/personal_view.png)
 
 Only assignments addressed to you show up. Spells and CC are filtered by
 what your class actually knows, so a warrior doesn't see Polymorph and a
