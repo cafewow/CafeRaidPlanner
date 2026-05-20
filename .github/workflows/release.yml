@@ -14,7 +14,7 @@ jobs:
           fetch-depth: 0 # packager wants full history to derive version info
 
       - name: Package and upload
-        uses: BigWigsMods/packager@v2
+        uses: BigWigsMods/packager@v2.5.1
 
         env:
           CF_API_KEY: ${{ secrets.CF_API_KEY }}
