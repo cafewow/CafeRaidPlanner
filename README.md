@@ -13,7 +13,7 @@ TOC (`Interface 20504`).
 
 ## Install
 
-Easiest way is [CurseForge](https://www.curseforge.com/wow/addons) — search
+Easiest way is [CurseForge](https://legacy.curseforge.com/wow/addons/caferaidplanner) — search
 for "CafeRaidPlanner". Or grab a release zip from this repo and drop the
 `CafeRaidPlanner` folder into your AddOns directory.
 
