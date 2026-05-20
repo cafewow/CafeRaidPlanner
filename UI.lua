@@ -145,11 +145,10 @@ local function markerInline(markerId)
 	)
 end
 
--- Resolve an assignment into the four cells of the table row. Returns:
---   icon, ability_text, target_text, full_ability, full_target
--- where the `full_*` variants are used for hover tooltips on truncation.
--- Reminders are not table rows (they live in Pull Notes); the dispatcher in
--- Refresh excludes them before calling this.
+-- Resolve an assignment into the row's three logical cells. Returns
+--   icon, ability_text, target_text
+-- (target is "" for non-kick assignments). Reminders never reach this — the
+-- Refresh dispatcher routes them to the Pull Notes section instead.
 local function resolveAssignmentRow(a)
 	local icon, ability, target
 	if a.kind == "equip" then
@@ -251,7 +250,7 @@ local function getProgressRow(i)
 	return r
 end
 
-local function ensureTableHeader()
+local function getTableHeader()
 	if tableHeader then return tableHeader end
 	local h = CreateFrame("Frame", nil, content)
 	h:SetHeight(14)
@@ -282,6 +281,17 @@ end
 
 local function cellOnLeave()
 	GameTooltip:Hide()
+end
+
+-- Anchor a cell inside its row: left edge to `leftAnchor` (+ offset), top and
+-- bottom to the row, fixed width. Used by both the table header and each
+-- assignment row to lay out the three columns identically.
+local function anchorCell(cell, leftAnchor, leftRel, leftOffset, width)
+	cell:ClearAllPoints()
+	cell:SetPoint("LEFT", leftAnchor, leftRel, leftOffset, 0)
+	cell:SetPoint("TOP", cell:GetParent(), "TOP", 0, 0)
+	cell:SetPoint("BOTTOM", cell:GetParent(), "BOTTOM", 0, 0)
+	cell:SetWidth(width)
 end
 
 local function makeCell(parent)
@@ -503,17 +513,22 @@ local function build()
 	grip:SetScript("OnMouseUp", function()
 		frame:StopMovingOrSizing()
 		saveSize()
-		Window:Refresh()
 	end)
 
+	-- OnSizeChanged fires many times per frame during a drag. Coalesce them
+	-- through a dirty flag consumed in OnUpdate so we run at most one Refresh
+	-- per render frame, while still giving the user live column resizing.
 	frame:SetScript("OnSizeChanged", function()
 		if frame._scroll and content then
 			content:SetWidth(frame._scroll:GetWidth())
 		end
-		-- Live-refresh during drag so column widths track the resize, not just
-		-- at mouse-up. Refresh is cheap (re-anchors a few dozen pooled rows)
-		-- and doesn't mutate frame size, so no recursion risk.
-		Window:Refresh()
+		frame._refreshDirty = true
+	end)
+	frame:SetScript("OnUpdate", function(self)
+		if self._refreshDirty then
+			self._refreshDirty = false
+			Window:Refresh()
+		end
 	end)
 
 	buildPullPopup()
@@ -647,13 +662,248 @@ local function isTruncated(fs)
 	return fs:GetStringWidth() > fs:GetWidth() + 0.5
 end
 
+-- A layout `ctx` is the mutable cursor passed through section functions:
+--   y:       pixels from content top, grows downward
+--   sIdx..:  pool indices (incremented as pooled elements are placed)
+--   W:       content width (drives every cell's SetWidth)
+--   pull, my, idx, pulls: pull-data shorthand
+-- Each section function reads ctx, places its own elements into the `content`
+-- frame, and mutates ctx.y / ctx.<pool>Idx. No section needs to know about the
+-- others — they compose by appending to the cursor.
+
+local function placeSection(ctx, titleText)
+	ctx.sIdx = ctx.sIdx + 1
+	local s = getSection(ctx.sIdx)
+	s:ClearAllPoints()
+	s:SetPoint("TOPLEFT", content, "TOPLEFT", 0, -ctx.y)
+	s:SetPoint("TOPRIGHT", content, "TOPRIGHT", 0, -ctx.y)
+	s.label:SetText(titleText)
+	s:Show()
+	ctx.y = ctx.y + SECTION_HEADER_H + 2
+end
+
+local function layoutPullNotes(ctx)
+	local pull, my, W = ctx.pull, ctx.my, ctx.W
+	local noteText = pull.note or ""
+	local reminders = {}
+	for _, a in ipairs(pull.assignments or {}) do
+		if a.kind == "reminder" and hasContent(a) and (not my or isMyAssignment(a)) then
+			reminders[#reminders + 1] = a
+		end
+	end
+	if noteText == "" and #reminders == 0 then return end
+
+	placeSection(ctx, "Pull Notes")
+	if noteText ~= "" then
+		local np = getNoteParagraph()
+		np:ClearAllPoints()
+		np:SetPoint("TOPLEFT", content, "TOPLEFT", 10, -ctx.y)
+		np:SetWidth(W - 14)
+		np:SetText(noteText)
+		np:Show()
+		ctx.y = ctx.y + math.max(14, np:GetStringHeight()) + 4
+	end
+	for _, r in ipairs(reminders) do
+		ctx.bIdx = ctx.bIdx + 1
+		local b = getBullet(ctx.bIdx)
+		b:ClearAllPoints()
+		b:SetPoint("TOPLEFT", content, "TOPLEFT", 10, -ctx.y)
+		b:SetWidth(W - 14)
+		b:SetText("- " .. (r.text or ""))
+		b:Show()
+		ctx.y = ctx.y + math.max(12, b:GetStringHeight()) + BULLET_GAP
+	end
+	ctx.y = ctx.y + SECTION_GAP
+end
+
+local function layoutKillProgress(ctx)
+	local entries = progressEntries(ctx.pull)
+	if #entries == 0 then return end
+	placeSection(ctx, "Kill Progress")
+	local W = ctx.W
+	for _, e in ipairs(entries) do
+		ctx.pIdx = ctx.pIdx + 1
+		local row = getProgressRow(ctx.pIdx)
+		row:ClearAllPoints()
+		row:SetPoint("TOPLEFT", content, "TOPLEFT", 10, -ctx.y)
+		row:SetWidth(W - 14)
+		local done = e.killed >= e.need
+		local color = done and "|cff7fff7f" or "|cffffffff"
+		local label
+		if e.kind == "pool" then
+			local names = {}
+			for _, nid in ipairs(e.npcIds) do
+				names[#names + 1] = CRP.Plan:NpcName(nid) or ("#" .. nid)
+			end
+			label = "pool: " .. table.concat(names, ", ")
+		else
+			label = CRP.Plan:NpcName(e.npcId) or ("npc #" .. e.npcId)
+		end
+		row:SetText(string.format("%s%d/%d|r  %s", color, e.killed, e.need, label))
+		row:Show()
+		ctx.y = ctx.y + PROGRESS_ROW_H
+	end
+	ctx.y = ctx.y + SECTION_GAP
+end
+
+-- Compute (cAbility, cTarget, cAssignee) from content width and view mode.
+-- In My view assignee is hidden (cAssignee = 0); its space is folded into the
+-- target column. In Raid view extra space splits 15%/25%/60% across the three
+-- columns, with deficit-stealing if the window is too narrow for the minimums.
+local function computeAssignmentColumns(W, my)
+	local pad = 4
+	local gap = 6
+	if my then
+		local avail = W - pad - ICON_W - gap - gap - pad
+		local cAbility = COL_ABILITY_MIN
+		local extra = avail - cAbility - COL_TARGET_MIN
+		if extra > 0 then cAbility = cAbility + math.floor(extra * 0.25) end
+		return cAbility, avail - cAbility, 0, pad, gap
+	end
+	local avail = W - pad - ICON_W - gap - gap - gap - pad
+	local cAbility, cTarget = COL_ABILITY_MIN, COL_TARGET_MIN
+	local cAssignee = avail - cAbility - cTarget
+	if cAssignee < COL_ASSIGNEE_MIN then
+		-- Window too narrow: steal from target first, then ability.
+		local deficit = COL_ASSIGNEE_MIN - cAssignee
+		local takeFromTarget = math.min(deficit, cTarget - 40)
+		cTarget = cTarget - takeFromTarget
+		deficit = deficit - takeFromTarget
+		if deficit > 0 then cAbility = math.max(60, cAbility - deficit) end
+		cAssignee = COL_ASSIGNEE_MIN
+	else
+		local extra = cAssignee - COL_ASSIGNEE_MIN
+		local addAbility = math.floor(extra * 0.15)
+		local addTarget = math.floor(extra * 0.25)
+		cAbility = cAbility + addAbility
+		cTarget = cTarget + addTarget
+		cAssignee = cAssignee - addAbility - addTarget
+	end
+	return cAbility, cTarget, cAssignee, pad, gap
+end
+
+local function layoutAssignments(ctx)
+	local pull, my, W = ctx.pull, ctx.my, ctx.W
+	local nonReminder = {}
+	for _, a in ipairs(pull.assignments or {}) do
+		if a.kind ~= "reminder" and hasContent(a) and (not my or isMyAssignment(a)) then
+			nonReminder[#nonReminder + 1] = a
+		end
+	end
+	if #nonReminder == 0 then return end
+
+	placeSection(ctx, "Assignments")
+	local cAbility, cTarget, cAssignee, pad, gap = computeAssignmentColumns(W, my)
+
+	-- Header row. FontString labels (not Frame-cells); anchorCell isn't a fit
+	-- since FontStrings don't have TOP/BOTTOM anchors on their parent the same
+	-- way Frame cells do.
+	local hRow = getTableHeader()
+	hRow:ClearAllPoints()
+	hRow:SetPoint("TOPLEFT", content, "TOPLEFT", pad, -ctx.y)
+	hRow:SetPoint("TOPRIGHT", content, "TOPRIGHT", -pad, -ctx.y)
+	hRow.ability:ClearAllPoints()
+	hRow.ability:SetPoint("LEFT", hRow, "LEFT", ICON_W + gap, 0)
+	hRow.ability:SetWidth(cAbility)
+	hRow.target:ClearAllPoints()
+	hRow.target:SetPoint("LEFT", hRow.ability, "RIGHT", gap, 0)
+	hRow.target:SetWidth(cTarget)
+	if my then
+		hRow.assignee:Hide()
+	else
+		hRow.assignee:ClearAllPoints()
+		hRow.assignee:SetPoint("LEFT", hRow.target, "RIGHT", gap, 0)
+		hRow.assignee:SetWidth(cAssignee)
+		hRow.assignee:Show()
+	end
+	hRow:Show()
+	ctx.y = ctx.y + 14
+
+	for _, a in ipairs(nonReminder) do
+		ctx.aIdx = ctx.aIdx + 1
+		local row = getAssignRow(ctx.aIdx)
+		row:ClearAllPoints()
+		row:SetPoint("TOPLEFT", content, "TOPLEFT", pad, -ctx.y)
+		row:SetPoint("TOPRIGHT", content, "TOPRIGHT", -pad, -ctx.y)
+
+		local icon, ability, target = resolveAssignmentRow(a)
+		row.icon:SetTexture(icon or ICON_FALLBACK)
+
+		anchorCell(row.ability, row, "LEFT", ICON_W + gap, cAbility)
+		row.ability.fs:SetText(ability)
+		row.ability._tip = ability ~= "" and ability or nil
+
+		anchorCell(row.target, row.ability, "RIGHT", gap, cTarget)
+		row.target.fs:SetText(target)
+		row.target._tip = target ~= "" and target or nil
+
+		local player = a.player or ""
+		local note = a.note or ""
+		if my then
+			-- Assignee is hidden in My view. If there's a note, append it to
+			-- the ability tooltip so it stays discoverable on hover.
+			row.assignee:Hide()
+			if note ~= "" then row.ability._tip = ability .. "\n\n" .. note end
+		else
+			local assigneeText
+			if player ~= "" and note ~= "" then
+				assigneeText = string.format("|cffc084fc%s:|r %s", player, note)
+			elseif player ~= "" then
+				assigneeText = string.format("|cffc084fc%s|r", player)
+			else
+				assigneeText = note
+			end
+			local tipParts = {}
+			if player ~= "" then
+				tipParts[#tipParts + 1] = string.format("|cffc084fc%s|r", player)
+			end
+			if note ~= "" then tipParts[#tipParts + 1] = note end
+			anchorCell(row.assignee, row.target, "RIGHT", gap, cAssignee)
+			row.assignee.fs:SetText(assigneeText)
+			row.assignee._tip = (#tipParts > 0) and table.concat(tipParts, "\n") or nil
+			row.assignee:Show()
+		end
+
+		row:Show()
+		ctx.y = ctx.y + ASSIGN_ROW_H
+	end
+	ctx.y = ctx.y + SECTION_GAP
+end
+
+local function layoutUpcoming(ctx)
+	local idx, pulls = ctx.idx, ctx.pulls
+	local previews = {}
+	for offset = 1, 3 do
+		local up = pulls[idx + offset]
+		if up then previews[#previews + 1] = { i = idx + offset, pull = up } end
+	end
+	if #previews == 0 then return end
+	placeSection(ctx, "Upcoming")
+	for _, p in ipairs(previews) do
+		ctx.uIdx = ctx.uIdx + 1
+		local row = getUpcomingRow(ctx.uIdx)
+		row:ClearAllPoints()
+		row:SetPoint("TOPLEFT", content, "TOPLEFT", 2, -ctx.y)
+		row:SetPoint("TOPRIGHT", content, "TOPRIGHT", -2, -ctx.y)
+		row.num:SetText(tostring(p.i))
+		local summary = pullMobSummary(p.pull)
+		row.name:SetText(summary)
+		row._tip = isTruncated(row.name) and summary or nil
+		row:EnableMouse(true)
+		row:SetScript("OnClick", function() CRP.Plan:SetCurrentPullIdx(p.i) end)
+		row:Show()
+		ctx.y = ctx.y + UPCOMING_ROW_H
+	end
+	ctx.y = ctx.y + SECTION_GAP
+end
+
 function Window:Refresh()
 	if not frame then return end
 	local plan = CRP.Plan:Current()
 	local pulls = CRP.Plan:Pulls()
 	local my = isMyView()
 
-	-- Clear every pool by default; the dispatcher below will Show what it uses.
+	-- Clear every pool by default; section functions Show only what they use.
 	for _, s in ipairs(sectionPool) do s:Hide() end
 	for _, b in ipairs(bulletPool) do b:Hide() end
 	for _, p in ipairs(progressPool) do p:Hide() end
@@ -665,7 +915,7 @@ function Window:Refresh()
 	if not plan or #pulls == 0 then
 		pullTitle:SetText("")
 		packLine:SetText("")
-		if pullCounter then pullCounter:SetText("") end
+		pullCounter:SetText("")
 		content:SetHeight(1)
 		emptyMsg:Show()
 		return
@@ -686,261 +936,27 @@ function Window:Refresh()
 	local pn = packNames(pull)
 	packLine:SetText(pn ~= "" and ("Packs: " .. pn) or "")
 
-	-- Content width drives every cell's SetWidth. Read from the scroll frame
-	-- since `content` itself may not yet be sized this frame.
+	-- Read width from the scroll frame since `content` itself may not yet be
+	-- sized this frame.
 	local W = frame._scroll and frame._scroll:GetWidth() or RAID_W - 30
 	if W < 1 then W = RAID_W - 30 end
 	content:SetWidth(W)
 
-	-- Layout cursor (pixels from content top, growing downward as positive y).
-	local y = 0
-	local sIdx, bIdx, pIdx, aIdx, uIdx = 0, 0, 0, 0, 0
+	local ctx = {
+		y = 0,
+		sIdx = 0, bIdx = 0, pIdx = 0, aIdx = 0, uIdx = 0,
+		W = W,
+		pull = pull,
+		my = my,
+		idx = idx,
+		pulls = pulls,
+	}
+	layoutPullNotes(ctx)
+	if not my then layoutKillProgress(ctx) end
+	layoutAssignments(ctx)
+	if not my then layoutUpcoming(ctx) end
 
-	local function placeSection(titleText)
-		sIdx = sIdx + 1
-		local s = getSection(sIdx)
-		s:ClearAllPoints()
-		s:SetPoint("TOPLEFT", content, "TOPLEFT", 0, -y)
-		s:SetPoint("TOPRIGHT", content, "TOPRIGHT", 0, -y)
-		s.label:SetText(titleText)
-		s:Show()
-		y = y + SECTION_HEADER_H + 2
-	end
-
-	-- ---- Section: Pull Notes ----
-	local noteText = pull.note or ""
-	local reminders = {}
-	for _, a in ipairs(pull.assignments or {}) do
-		if a.kind == "reminder" and hasContent(a) and (not my or isMyAssignment(a)) then
-			reminders[#reminders + 1] = a
-		end
-	end
-	if noteText ~= "" or #reminders > 0 then
-		placeSection("Pull Notes")
-		if noteText ~= "" then
-			local np = getNoteParagraph()
-			np:ClearAllPoints()
-			np:SetPoint("TOPLEFT", content, "TOPLEFT", 10, -y)
-			np:SetWidth(W - 14)
-			np:SetText(noteText)
-			np:Show()
-			y = y + math.max(14, np:GetStringHeight()) + 4
-		end
-		for _, r in ipairs(reminders) do
-			bIdx = bIdx + 1
-			local b = getBullet(bIdx)
-			b:ClearAllPoints()
-			b:SetPoint("TOPLEFT", content, "TOPLEFT", 10, -y)
-			b:SetWidth(W - 14)
-			b:SetText("- " .. (r.text or ""))
-			b:Show()
-			y = y + math.max(12, b:GetStringHeight()) + BULLET_GAP
-		end
-		y = y + SECTION_GAP
-	end
-
-	-- ---- Section: Kill Progress (raid view only) ----
-	if not my then
-		local entries = progressEntries(pull)
-		if #entries > 0 then
-			placeSection("Kill Progress")
-			for _, e in ipairs(entries) do
-				pIdx = pIdx + 1
-				local row = getProgressRow(pIdx)
-				row:ClearAllPoints()
-				row:SetPoint("TOPLEFT", content, "TOPLEFT", 10, -y)
-				row:SetWidth(W - 14)
-				local done = e.killed >= e.need
-				local color = done and "|cff7fff7f" or "|cffffffff"
-				local label
-				if e.kind == "pool" then
-					local names = {}
-					for _, nid in ipairs(e.npcIds) do
-						names[#names + 1] = CRP.Plan:NpcName(nid) or ("#" .. nid)
-					end
-					label = "pool: " .. table.concat(names, ", ")
-				else
-					label = CRP.Plan:NpcName(e.npcId) or ("npc #" .. e.npcId)
-				end
-				row:SetText(string.format("%s%d/%d|r  %s", color, e.killed, e.need, label))
-				row:Show()
-				y = y + PROGRESS_ROW_H
-			end
-			y = y + SECTION_GAP
-		end
-	end
-
-	-- ---- Section: Assignments (3-column table, reminders excluded) ----
-	local nonReminder = {}
-	for _, a in ipairs(pull.assignments or {}) do
-		if a.kind ~= "reminder" and hasContent(a) and (not my or isMyAssignment(a)) then
-			nonReminder[#nonReminder + 1] = a
-		end
-	end
-	if #nonReminder > 0 then
-		placeSection("Assignments")
-
-		-- Column geometry derived from current content width. In Raid view we
-		-- have three columns; in My view the Assignee column is hidden (every
-		-- row is implicitly mine and the player name would be redundant) and
-		-- its space is given to Target.
-		local pad = 4
-		local gap = 6
-		local cAbility, cTarget, cAssignee
-		if my then
-			local avail = W - pad - ICON_W - gap - gap - pad
-			cAbility = COL_ABILITY_MIN
-			cTarget = math.max(COL_TARGET_MIN, avail - cAbility)
-			cAssignee = 0
-			-- Distribute any extra: 25% ability, 75% target.
-			local extra = (avail - cAbility - COL_TARGET_MIN)
-			if extra > 0 then
-				cAbility = COL_ABILITY_MIN + math.floor(extra * 0.25)
-				cTarget = avail - cAbility
-			end
-		else
-			local avail = W - pad - ICON_W - gap - gap - gap - pad
-			cAbility = COL_ABILITY_MIN
-			cTarget = COL_TARGET_MIN
-			cAssignee = avail - cAbility - cTarget
-			if cAssignee < COL_ASSIGNEE_MIN then
-				-- Window too narrow: steal from target first, then ability.
-				local deficit = COL_ASSIGNEE_MIN - cAssignee
-				local takeFromTarget = math.min(deficit, cTarget - 40)
-				cTarget = cTarget - takeFromTarget
-				deficit = deficit - takeFromTarget
-				if deficit > 0 then
-					cAbility = math.max(60, cAbility - deficit)
-				end
-				cAssignee = COL_ASSIGNEE_MIN
-			else
-				-- Extra space: split across all three columns. Bias toward
-				-- assignee since it carries the longest free-text content.
-				local extra = cAssignee - COL_ASSIGNEE_MIN
-				local addAbility = math.floor(extra * 0.15)
-				local addTarget = math.floor(extra * 0.25)
-				cAbility = cAbility + addAbility
-				cTarget = cTarget + addTarget
-				cAssignee = cAssignee - addAbility - addTarget
-			end
-		end
-
-		-- Header row
-		local hRow = ensureTableHeader()
-		hRow:ClearAllPoints()
-		hRow:SetPoint("TOPLEFT", content, "TOPLEFT", pad, -y)
-		hRow:SetPoint("TOPRIGHT", content, "TOPRIGHT", -pad, -y)
-		hRow.ability:ClearAllPoints()
-		hRow.ability:SetPoint("LEFT", hRow, "LEFT", ICON_W + gap, 0)
-		hRow.ability:SetWidth(cAbility)
-		hRow.target:ClearAllPoints()
-		hRow.target:SetPoint("LEFT", hRow.ability, "RIGHT", gap, 0)
-		hRow.target:SetWidth(cTarget)
-		if my then
-			hRow.assignee:Hide()
-		else
-			hRow.assignee:ClearAllPoints()
-			hRow.assignee:SetPoint("LEFT", hRow.target, "RIGHT", gap, 0)
-			hRow.assignee:SetWidth(cAssignee)
-			hRow.assignee:Show()
-		end
-		hRow:Show()
-		y = y + 14
-
-		local function anchorCell(cell, leftAnchor, leftRel, leftOffset, width)
-			cell:ClearAllPoints()
-			cell:SetPoint("LEFT", leftAnchor, leftRel, leftOffset, 0)
-			cell:SetPoint("TOP", cell:GetParent(), "TOP", 0, 0)
-			cell:SetPoint("BOTTOM", cell:GetParent(), "BOTTOM", 0, 0)
-			cell:SetWidth(width)
-		end
-
-		for _, a in ipairs(nonReminder) do
-			aIdx = aIdx + 1
-			local row = getAssignRow(aIdx)
-			row:ClearAllPoints()
-			row:SetPoint("TOPLEFT", content, "TOPLEFT", pad, -y)
-			row:SetPoint("TOPRIGHT", content, "TOPRIGHT", -pad, -y)
-
-			local icon, ability, target = resolveAssignmentRow(a)
-			row.icon:SetTexture(icon or ICON_FALLBACK)
-
-			anchorCell(row.ability, row, "LEFT", ICON_W + gap, cAbility)
-			row.ability.fs:SetText(ability)
-			row.ability._tip = ability ~= "" and ability or nil
-
-			anchorCell(row.target, row.ability, "RIGHT", gap, cTarget)
-			row.target.fs:SetText(target)
-			row.target._tip = target ~= "" and target or nil
-
-			-- Assignee cell. Hidden in My view (every row is me; per-assignment
-			-- notes still surface — the assignee cell's tooltip carries the note
-			-- when present, so hovering the (now hidden) area does nothing but
-			-- hovering the row's ability cell can fall back to the note via the
-			-- ability tooltip if we want. For now: in My view we tuck the note
-			-- into the ability cell's tooltip.
-			local player = a.player or ""
-			local note = a.note or ""
-			if my then
-				row.assignee:Hide()
-				if note ~= "" then
-					row.ability._tip = ability .. "\n\n" .. note
-				end
-			else
-				local parts = {}
-				if player ~= "" then
-					parts[#parts + 1] = string.format("|cffc084fc%s|r", player)
-				end
-				if note ~= "" then parts[#parts + 1] = note end
-				local assigneeText
-				if player ~= "" and note ~= "" then
-					assigneeText = string.format("|cffc084fc%s:|r %s", player, note)
-				elseif player ~= "" then
-					assigneeText = string.format("|cffc084fc%s|r", player)
-				else
-					assigneeText = note
-				end
-				anchorCell(row.assignee, row.target, "RIGHT", gap, cAssignee)
-				row.assignee.fs:SetText(assigneeText)
-				row.assignee._tip = (#parts > 0) and table.concat(parts, "\n") or nil
-				row.assignee:Show()
-			end
-
-			row:Show()
-			y = y + ASSIGN_ROW_H
-		end
-		y = y + SECTION_GAP
-	end
-
-	-- ---- Section: Upcoming (raid view only) ----
-	if not my then
-		local previews = {}
-		for offset = 1, 3 do
-			local up = pulls[idx + offset]
-			if up then previews[#previews + 1] = { i = idx + offset, pull = up } end
-		end
-		if #previews > 0 then
-			placeSection("Upcoming")
-			for _, p in ipairs(previews) do
-				uIdx = uIdx + 1
-				local row = getUpcomingRow(uIdx)
-				row:ClearAllPoints()
-				row:SetPoint("TOPLEFT", content, "TOPLEFT", 2, -y)
-				row:SetPoint("TOPRIGHT", content, "TOPRIGHT", -2, -y)
-				row.num:SetText(tostring(p.i))
-				local summary = pullMobSummary(p.pull)
-				row.name:SetText(summary)
-				row._tip = isTruncated(row.name) and summary or nil
-				row:EnableMouse(true)
-				row:SetScript("OnClick", function() CRP.Plan:SetCurrentPullIdx(p.i) end)
-				row:Show()
-				y = y + UPCOMING_ROW_H
-			end
-			y = y + SECTION_GAP
-		end
-	end
-
-	content:SetHeight(math.max(1, y))
+	content:SetHeight(math.max(1, ctx.y))
 	refreshPullPopupRows()
 end
 
