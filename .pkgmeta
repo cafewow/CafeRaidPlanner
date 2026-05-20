@@ -1,0 +1,11 @@
+package-as: CafeRaidPlanner
+
+# Libraries are vendored under libs/ already, so no externals to fetch.
+
+# Files that shouldn't ship in the released zip (they're repo-only).
+ignore:
+  - .github
+  - .pkgmeta
+  - README.md
+  - LICENSE
+  - docs

@@ -2,10 +2,11 @@
 ## Title: CafeRaidPlanner
 ## Notes: Plan raid cooldowns on a map, like MDT for raids.
 ## Author: Gustaf
-## Version: 0.1.0-dev
+## Version: @project-version@
 ## SavedVariables: CafeRaidPlannerDB
 ## OptionalDeps: Ace3, LibDeflate
 ## X-Category: Raid
+## X-Curse-Project-ID: 1526883
 
 libs\load_libs.xml
 init.lua
