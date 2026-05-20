@@ -4,28 +4,50 @@ CRP.ui = CRP.ui or {}
 local Window = {}
 CRP.ui.Window = Window
 
-local RAID_W, RAID_H = 420, 620
-local MY_W, MY_H = 360, 320
-local ROW_H = 28
+-- Sidebar-shaped defaults. Window is laid out as a vertical stack of titled
+-- sections inside a single scroll frame, so height is mostly informational —
+-- the user can size up or down freely and section content reflows.
+local RAID_W, RAID_H = 330, 560
+local MY_W, MY_H = 290, 320
 
--- Upcoming-pulls preview
-local UPCOMING_COUNT = 3
-local UPCOMING_ROW_H = 20
-local UPCOMING_HEADER_H = 18
-local UPCOMING_HEIGHT = UPCOMING_HEADER_H + UPCOMING_COUNT * UPCOMING_ROW_H + 8
-local UPCOMING_ICON = 16
-local UPCOMING_MAX_ICONS = 6
+-- MIN_W is set so the raid-view nav strip doesn't overlap: prev(24) + gap(4)
+-- + next(24) + gap(6) + counter(96) + gap + push(50) + gap(4) + import(62)
+-- plus the frame's 16px side margins ≈ 320; tuned to 330.
+local MIN_W, MIN_H = 330, 200
+local MAX_W, MAX_H = 1200, 1200
+
+-- Section/row metrics
+local SECTION_HEADER_H = 20
+local SECTION_GAP = 8
+local ASSIGN_ROW_H = 22
+local PROGRESS_ROW_H = 14
+local UPCOMING_ROW_H = 18
+local BULLET_GAP = 2
+
+-- Assignment table column widths. Assignee fills remaining space.
+local ICON_W = 20
+local COL_ABILITY_MIN = 100
+local COL_TARGET_MIN = 80
+local COL_ASSIGNEE_MIN = 50
 
 local frame, content
 local pendingItemIds = {} -- items whose info was nil; refresh when GET_ITEM_INFO_RECEIVED fires
-local assignRowPool = {}
 local buildPullPopup, refreshPullPopupRows -- forward decls; defined later in file
-local progressLines = {} -- FontString pool for "kills/required mob" rows
-local packLine, bossLine, noteBox, pullTitle, pullCounter, prevBtn, nextBtn, emptyMsg
-local progressHeader, progressAnchor
-local pushBtn, importBtn, modeBtn
+
+-- Header chrome
+local pullTitle, pullCounter, packLine, emptyMsg
+local prevBtn, nextBtn, pushBtn, importBtn, modeBtn
 local importDialog
-local upcomingContainer, upcomingHeader, upcomingRows = nil, nil, {}
+
+-- Object pools — every section element is parented to `content` (the scroll
+-- child) and re-anchored on each Refresh.
+local sectionPool = {}
+local bulletPool = {}
+local progressPool = {}
+local assignPool = {}
+local upcomingPool = {}
+local tableHeader
+local noteParagraph
 
 local function currentMode()
 	return (CRP.db and CRP.db.char and CRP.db.char.viewMode) or "raid"
@@ -37,9 +59,7 @@ end
 
 -- Strip realm suffix from a name like "Gustaf-Gehennas".
 local function stripRealm(name)
-	if not name or name == "" then
-		return name
-	end
+	if not name or name == "" then return name end
 	return (name:match("^([^-]+)")) or name
 end
 
@@ -47,24 +67,33 @@ end
 -- (freshly added but unfilled) are skipped in the current-pull list and the
 -- upcoming preview.
 local function hasContent(a)
-	if not a then
-		return false
-	end
+	if not a then return false end
 	if a.kind == "reminder" then
 		return a.text ~= nil and a.text ~= ""
 	end
-	-- spell, item, equip, kick all need a numeric id
 	return type(a.id) == "number"
+end
+
+-- IsSpellKnown is rank-specific: an assignment authored against Pummel rank 1
+-- returns false for a warrior who only knows rank 2. Fall back to a name-based
+-- spellbook lookup — GetSpellInfo(name) returns info iff the player has any
+-- rank of that spell, so it's rank-agnostic. Used for both ability spells and
+-- kicks (kicks were the trigger: classes typically know one specific rank of
+-- their interrupt and the planner can't predict which).
+local function knowsSpell(spellId)
+	if not spellId then return false end
+	if IsSpellKnown and IsSpellKnown(spellId) then return true end
+	local name = GetSpellInfo(spellId)
+	if not name then return false end
+	return GetSpellInfo(name) ~= nil
 end
 
 -- Assignment filter for My view:
 --   - player set:   only if it matches me (case-insensitive, realm-stripped)
 --   - player empty: items and reminders always pass (no way to class-filter
---                   a free-text reminder); spells only if I know them.
+--                   a free-text reminder); spells/kicks only if I know them.
 local function isMyAssignment(a)
-	if not a then
-		return false
-	end
+	if not a then return false end
 	local player = a.player or ""
 	if player ~= "" then
 		local me = UnitName("player") or ""
@@ -74,29 +103,22 @@ local function isMyAssignment(a)
 		return true
 	end
 	if (a.kind == "spell" or a.kind == "kick") and a.id then
-		local ok = IsSpellKnown and IsSpellKnown(a.id)
-		return ok and true or false
+		return knowsSpell(a.id)
 	end
 	return false
 end
 
--- Item icon fallback when GetItemInfo hasn't loaded yet.
 local ICON_FALLBACK = "Interface\\Icons\\INV_Misc_QuestionMark"
--- Reminder kind uses a generic "note" icon; its body is the reminder text.
 local REMINDER_ICON = "Interface\\Icons\\INV_Misc_Note_01"
 
 local function lookupSpell(spellId)
-	if not spellId then
-		return nil, ICON_FALLBACK
-	end
+	if not spellId then return nil, ICON_FALLBACK end
 	local name, _, icon = GetSpellInfo(spellId)
 	return name, icon or ICON_FALLBACK
 end
 
 local function lookupItem(itemId)
-	if not itemId then
-		return nil, ICON_FALLBACK
-	end
+	if not itemId then return nil, ICON_FALLBACK end
 	local name, _, _, _, _, _, _, _, _, icon = GetItemInfo(itemId)
 	if not name then
 		pendingItemIds[itemId] = true
@@ -105,8 +127,6 @@ local function lookupItem(itemId)
 	return name, icon or ICON_FALLBACK
 end
 
--- WoW's built-in raid target icon textures, indexed 1..8.
--- Order matches MARKERS in the web app (data/markers.ts) and the in-game order.
 local MARKER_TEX_INDEX = {
 	star = 1, circle = 2, diamond = 3, triangle = 4,
 	moon = 5, square = 6, cross = 7, skull = 8,
@@ -125,94 +145,54 @@ local function markerInline(markerId)
 	)
 end
 
--- Compose the kick row label "<spell> → <target>". Target is either a marker
--- (rendered with the in-game raid icon) or an npc looked up via Plan:NpcName.
-local function resolveKick(a)
-	local spellName, icon = lookupSpell(a.id)
-	local targetText
-	if a.targetMarker and a.targetMarker ~= "" then
-		targetText = markerInline(a.targetMarker)
-	elseif a.targetNpcId then
-		targetText = (CRP.Plan and CRP.Plan:NpcName(a.targetNpcId))
-			or string.format("npc #%d", a.targetNpcId)
-	end
-	if targetText then
-		return string.format("%s → %s", spellName or string.format("spell #%d", a.id or 0), targetText), icon
-	end
-	return spellName, icon
-end
-
-local function resolveAssignment(a)
-	if a.kind == "reminder" then
-		return a.text or "(reminder)", REMINDER_ICON
-	end
+-- Resolve an assignment into the four cells of the table row. Returns:
+--   icon, ability_text, target_text, full_ability, full_target
+-- where the `full_*` variants are used for hover tooltips on truncation.
+-- Reminders are not table rows (they live in Pull Notes); the dispatcher in
+-- Refresh excludes them before calling this.
+local function resolveAssignmentRow(a)
+	local icon, ability, target
 	if a.kind == "equip" then
-		local name, icon = lookupItem(a.id)
-		if name then
-			return "Equip: " .. name, icon
+		local name, ic = lookupItem(a.id)
+		icon = ic
+		ability = name and ("Equip: " .. name) or string.format("equip #%d", a.id or 0)
+	elseif a.kind == "item" then
+		local name, ic = lookupItem(a.id)
+		icon = ic
+		ability = name or string.format("item #%d", a.id or 0)
+	elseif a.kind == "kick" then
+		local name, ic = lookupSpell(a.id)
+		icon = ic
+		ability = name or string.format("spell #%d", a.id or 0)
+		if a.targetMarker and a.targetMarker ~= "" then
+			target = markerInline(a.targetMarker)
+		elseif a.targetNpcId then
+			target = (CRP.Plan and CRP.Plan:NpcName(a.targetNpcId))
+				or string.format("npc #%d", a.targetNpcId)
 		end
-		return name, icon
+	else -- "spell" or unknown
+		local name, ic = lookupSpell(a.id)
+		icon = ic
+		ability = name or string.format("spell #%d", a.id or 0)
 	end
-	if a.kind == "item" then
-		return lookupItem(a.id)
-	end
-	if a.kind == "kick" then
-		return resolveKick(a)
-	end
-	return lookupSpell(a.id)
+	return icon, ability or "", target or ""
 end
-
--- A reusable assignment row.
-local function makeAssignRow(parent)
-	local row = CreateFrame("Frame", nil, parent)
-	row:SetHeight(ROW_H)
-
-	local icon = row:CreateTexture(nil, "ARTWORK")
-	icon:SetSize(22, 22)
-	icon:SetPoint("LEFT", 4, 0)
-	icon:SetTexture(ICON_FALLBACK)
-	row.icon = icon
-
-	local name = row:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
-	name:SetPoint("LEFT", icon, "RIGHT", 8, 0)
-	name:SetWidth(140)
-	name:SetJustifyH("LEFT")
-	row.name = name
-
-	local note = row:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-	note:SetPoint("LEFT", name, "RIGHT", 6, 0)
-	note:SetPoint("RIGHT", row, "RIGHT", -4, 0)
-	note:SetJustifyH("LEFT")
-	note:SetTextColor(0.8, 0.8, 0.8)
-	row.note = note
-
-	return row
-end
-
-local MIN_W, MIN_H = 280, 200
-local MAX_W, MAX_H = 1200, 1200
 
 local function savePosition()
-	if not frame then
-		return
-	end
+	if not frame then return end
 	local point, _, relPoint, x, y = frame:GetPoint()
 	CRP.db.char.window.position = { point = point, relPoint = relPoint, x = x, y = y }
 end
 
 local function saveSize()
-	if not frame then
-		return
-	end
+	if not frame then return end
 	local w, h = frame:GetSize()
 	local key = isMyView() and "mySize" or "raidSize"
 	CRP.db.char.window[key] = { w = math.floor(w), h = math.floor(h) }
 end
 
 local function restorePosition()
-	if not frame then
-		return
-	end
+	if not frame then return end
 	local pos = CRP.db.char.window.position
 	frame:ClearAllPoints()
 	if pos and pos.point then
@@ -222,14 +202,164 @@ local function restorePosition()
 	end
 end
 
+-- Section header: a small bar texture + a label. Section content stacks below.
+local function getSection(i)
+	local s = sectionPool[i]
+	if s then return s end
+	s = CreateFrame("Frame", nil, content)
+	s:SetHeight(SECTION_HEADER_H)
+	local bar = s:CreateTexture(nil, "BACKGROUND")
+	bar:SetColorTexture(1, 0.82, 0, 0.18)
+	bar:SetPoint("BOTTOMLEFT", 0, 0)
+	bar:SetPoint("BOTTOMRIGHT", 0, 0)
+	bar:SetHeight(1)
+	local label = s:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+	label:SetPoint("LEFT", 2, 2)
+	label:SetTextColor(1, 0.82, 0)
+	s.label = label
+	sectionPool[i] = s
+	return s
+end
+
+local function getBullet(i)
+	local b = bulletPool[i]
+	if b then return b end
+	b = content:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+	b:SetJustifyH("LEFT")
+	b:SetJustifyV("TOP")
+	b:SetWordWrap(true)
+	bulletPool[i] = b
+	return b
+end
+
+local function getNoteParagraph()
+	if noteParagraph then return noteParagraph end
+	noteParagraph = content:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+	noteParagraph:SetJustifyH("LEFT")
+	noteParagraph:SetJustifyV("TOP")
+	noteParagraph:SetWordWrap(true)
+	return noteParagraph
+end
+
+local function getProgressRow(i)
+	local r = progressPool[i]
+	if r then return r end
+	r = content:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+	r:SetJustifyH("LEFT")
+	r:SetWordWrap(false)
+	progressPool[i] = r
+	return r
+end
+
+local function ensureTableHeader()
+	if tableHeader then return tableHeader end
+	local h = CreateFrame("Frame", nil, content)
+	h:SetHeight(14)
+	local function col(text)
+		local fs = h:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+		fs:SetJustifyH("LEFT")
+		fs:SetWordWrap(false)
+		fs:SetTextColor(0.7, 0.7, 0.7)
+		fs:SetText(text)
+		return fs
+	end
+	h.ability = col("Ability")
+	h.target = col("Target")
+	h.assignee = col("Assignee")
+	tableHeader = h
+	return tableHeader
+end
+
+-- A cell is a Frame wrapping a FontString so it can receive mouse events
+-- independently of its row. Hovering a cell shows a tooltip with that cell's
+-- own content (set per-Refresh into `cell._tip`).
+local function cellOnEnter(self)
+	if not self._tip or self._tip == "" then return end
+	GameTooltip:SetOwner(self, "ANCHOR_TOPRIGHT")
+	GameTooltip:SetText(self._tip, 1, 1, 1, 1, true)
+	GameTooltip:Show()
+end
+
+local function cellOnLeave()
+	GameTooltip:Hide()
+end
+
+local function makeCell(parent)
+	local cell = CreateFrame("Frame", nil, parent)
+	cell:EnableMouse(true)
+	local fs = cell:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+	fs:SetPoint("LEFT")
+	fs:SetPoint("RIGHT")
+	fs:SetJustifyH("LEFT")
+	fs:SetJustifyV("MIDDLE")
+	fs:SetWordWrap(false)
+	cell.fs = fs
+	cell:SetScript("OnEnter", cellOnEnter)
+	cell:SetScript("OnLeave", cellOnLeave)
+	return cell
+end
+
+local function getAssignRow(i)
+	local row = assignPool[i]
+	if row then return row end
+	row = CreateFrame("Frame", nil, content)
+	row:SetHeight(ASSIGN_ROW_H)
+
+	local icon = row:CreateTexture(nil, "ARTWORK")
+	icon:SetSize(ICON_W, ICON_W)
+	icon:SetPoint("LEFT", 2, 0)
+	row.icon = icon
+
+	row.ability = makeCell(row)
+	row.target = makeCell(row)
+	row.assignee = makeCell(row)
+
+	assignPool[i] = row
+	return row
+end
+
+local function getUpcomingRow(i)
+	local row = upcomingPool[i]
+	if row then return row end
+	row = CreateFrame("Button", nil, content)
+	row:SetHeight(UPCOMING_ROW_H)
+	local bg = row:CreateTexture(nil, "BACKGROUND")
+	bg:SetAllPoints()
+	bg:SetColorTexture(1, 1, 1, 0)
+	row.bg = bg
+	local num = row:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
+	num:SetPoint("LEFT", 4, 0)
+	num:SetWidth(22)
+	num:SetJustifyH("RIGHT")
+	row.num = num
+	local name = row:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+	name:SetPoint("LEFT", num, "RIGHT", 6, 0)
+	name:SetPoint("RIGHT", row, "RIGHT", -4, 0)
+	name:SetJustifyH("LEFT")
+	name:SetWordWrap(false)
+	row.name = name
+	row:SetScript("OnEnter", function(s)
+		s.bg:SetColorTexture(1, 1, 1, 0.08)
+		if s._tip and s._tip ~= "" then
+			GameTooltip:SetOwner(s, "ANCHOR_TOPRIGHT")
+			GameTooltip:SetText(s._tip, 1, 1, 1, 1, true)
+			GameTooltip:Show()
+		end
+	end)
+	row:SetScript("OnLeave", function(s)
+		s.bg:SetColorTexture(1, 1, 1, 0)
+		GameTooltip:Hide()
+	end)
+	upcomingPool[i] = row
+	return row
+end
+
 local function build()
 	frame = CreateFrame("Frame", "CafeRaidPlannerWindow", UIParent, "BackdropTemplate")
 	frame:SetSize(RAID_W, RAID_H)
 	frame:SetPoint("CENTER")
 	frame:SetMovable(true)
 	frame:SetResizable(true)
-	-- SetResizeBounds on recent Classic Era / retail; SetMinResize/SetMaxResize
-	-- on older TBC Classic builds. Call whichever exists.
 	if frame.SetResizeBounds then
 		frame:SetResizeBounds(MIN_W, MIN_H, MAX_W, MAX_H)
 	else
@@ -249,16 +379,14 @@ local function build()
 		insets = { left = 8, right = 8, top = 8, bottom = 8 },
 	})
 
-	-- drag handle
+	-- drag handle (title bar)
 	local title = CreateFrame("Frame", nil, frame)
 	title:SetPoint("TOPLEFT", 10, -10)
 	title:SetPoint("TOPRIGHT", -10, -10)
 	title:SetHeight(24)
 	title:EnableMouse(true)
 	title:RegisterForDrag("LeftButton")
-	title:SetScript("OnDragStart", function()
-		frame:StartMoving()
-	end)
+	title:SetScript("OnDragStart", function() frame:StartMoving() end)
 	title:SetScript("OnDragStop", function()
 		frame:StopMovingOrSizing()
 		savePosition()
@@ -269,70 +397,14 @@ local function build()
 
 	local closeBtn = CreateFrame("Button", nil, frame, "UIPanelCloseButton")
 	closeBtn:SetPoint("TOPRIGHT", 0, 2)
-	closeBtn:SetScript("OnClick", function()
-		frame:Hide()
-	end)
+	closeBtn:SetScript("OnClick", function() frame:Hide() end)
+	-- The drag-handle `title` frame above spans the full top edge with
+	-- EnableMouse(true), which would swallow clicks on the close button. Lift
+	-- the button above the title's frame level so its hit area wins.
+	closeBtn:SetFrameLevel(title:GetFrameLevel() + 5)
 
-	-- nav strip
-	local nav = CreateFrame("Frame", nil, frame)
-	nav:SetPoint("TOPLEFT", 16, -44)
-	nav:SetPoint("TOPRIGHT", -16, -44)
-	nav:SetHeight(22)
-
-	prevBtn = CreateFrame("Button", nil, nav, "UIPanelButtonTemplate")
-	prevBtn:SetSize(24, 22)
-	prevBtn:SetPoint("LEFT")
-	prevBtn:SetText("<")
-	prevBtn:SetScript("OnClick", function()
-		CRP.Plan:Prev()
-	end)
-
-	nextBtn = CreateFrame("Button", nil, nav, "UIPanelButtonTemplate")
-	nextBtn:SetSize(24, 22)
-	nextBtn:SetPoint("LEFT", prevBtn, "RIGHT", 4, 0)
-	nextBtn:SetText(">")
-	nextBtn:SetScript("OnClick", function()
-		CRP.Plan:Next()
-	end)
-
-	-- Pull counter is a button that opens a jump-to-pull popup (our own —
-	-- EasyMenu isn't available on every client, and it doesn't scroll).
-	pullCounter = CreateFrame("Button", nil, nav, "UIPanelButtonTemplate")
-	pullCounter:SetSize(100, 18)
-	pullCounter:SetPoint("LEFT", nextBtn, "RIGHT", 8, 0)
-	pullCounter:SetText("")
-	pullCounter:SetScript("OnClick", function(self)
-		Window:TogglePullPopup(self)
-	end)
-
-	importBtn = CreateFrame("Button", nil, nav, "UIPanelButtonTemplate")
-	importBtn:SetSize(70, 22)
-	importBtn:SetPoint("RIGHT")
-	importBtn:SetText("Import...")
-	importBtn:SetScript("OnClick", function()
-		Window:ShowImport()
-	end)
-
-	-- Push button — visible only when the user could actually push (leads a
-	-- group/raid). Wired to the Comms stub for now; real broadcast lands in
-	-- phase C without needing to change this callsite.
-	pushBtn = CreateFrame("Button", nil, nav, "UIPanelButtonTemplate")
-	pushBtn:SetSize(60, 22)
-	pushBtn:SetPoint("RIGHT", importBtn, "LEFT", -4, 0)
-	pushBtn:SetText("Push")
-	pushBtn:SetScript("OnClick", function()
-		local ok, err = CRP.Comms:PushPlan()
-		if not ok and err then
-			print("|cffff8888CRP:|r push: " .. err)
-		end
-	end)
-	pushBtn:SetScript("OnShow", function(self)
-		self:SetEnabled(CRP.Comms and CRP.Comms:CanPush() or false)
-	end)
-
-	-- View-mode toggle. Parented to `title` (the drag handle), which raised the
-	-- button's frame level above the handle so clicks reach it. Text updates
-	-- in ApplyMode to reflect the current state.
+	-- View-mode toggle (parented to title bar so its frame level sits above the
+	-- drag handle and clicks reach it).
 	modeBtn = CreateFrame("Button", nil, title, "UIPanelButtonTemplate")
 	modeBtn:SetSize(90, 20)
 	modeBtn:SetPoint("RIGHT", title, "RIGHT", -28, 0)
@@ -345,102 +417,109 @@ local function build()
 		Window:Refresh()
 	end)
 
-	-- pull title
+	-- nav strip (prev/next/counter on the left, push/import on the right). Whole
+	-- strip hides in My view.
+	local nav = CreateFrame("Frame", nil, frame)
+	nav:SetPoint("TOPLEFT", 16, -44)
+	nav:SetPoint("TOPRIGHT", -16, -44)
+	nav:SetHeight(22)
+	frame._nav = nav
+
+	prevBtn = CreateFrame("Button", nil, nav, "UIPanelButtonTemplate")
+	prevBtn:SetSize(24, 22)
+	prevBtn:SetPoint("LEFT")
+	prevBtn:SetText("<")
+	prevBtn:SetScript("OnClick", function() CRP.Plan:Prev() end)
+
+	nextBtn = CreateFrame("Button", nil, nav, "UIPanelButtonTemplate")
+	nextBtn:SetSize(24, 22)
+	nextBtn:SetPoint("LEFT", prevBtn, "RIGHT", 4, 0)
+	nextBtn:SetText(">")
+	nextBtn:SetScript("OnClick", function() CRP.Plan:Next() end)
+
+	pullCounter = CreateFrame("Button", nil, nav, "UIPanelButtonTemplate")
+	pullCounter:SetSize(96, 18)
+	pullCounter:SetPoint("LEFT", nextBtn, "RIGHT", 6, 0)
+	pullCounter:SetText("")
+	pullCounter:SetScript("OnClick", function(self) Window:TogglePullPopup(self) end)
+
+	importBtn = CreateFrame("Button", nil, nav, "UIPanelButtonTemplate")
+	importBtn:SetSize(62, 22)
+	importBtn:SetPoint("RIGHT")
+	importBtn:SetText("Import")
+	importBtn:SetScript("OnClick", function() Window:ShowImport() end)
+
+	pushBtn = CreateFrame("Button", nil, nav, "UIPanelButtonTemplate")
+	pushBtn:SetSize(50, 22)
+	pushBtn:SetPoint("RIGHT", importBtn, "LEFT", -4, 0)
+	pushBtn:SetText("Push")
+	pushBtn:SetScript("OnClick", function()
+		local ok, err = CRP.Comms:PushPlan()
+		if not ok and err then print("|cffff8888CRP:|r push: " .. err) end
+	end)
+	pushBtn:SetScript("OnShow", function(self)
+		self:SetEnabled(CRP.Comms and CRP.Comms:CanPush() or false)
+	end)
+
+	-- pull title (large)
 	pullTitle = frame:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
 	pullTitle:SetPoint("TOPLEFT", 16, -72)
 	pullTitle:SetPoint("TOPRIGHT", -16, -72)
 	pullTitle:SetJustifyH("LEFT")
+	pullTitle:SetWordWrap(false)
 
-	-- boss line
-	bossLine = frame:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
-	bossLine:SetPoint("TOPLEFT", 16, -96)
-	bossLine:SetPoint("TOPRIGHT", -16, -96)
-	bossLine:SetJustifyH("LEFT")
-	bossLine:SetTextColor(1, 0.82, 0)
-
-	-- pack line (aggregated)
+	-- packs subtitle
 	packLine = frame:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-	packLine:SetPoint("TOPLEFT", 16, -114)
-	packLine:SetPoint("TOPRIGHT", -16, -114)
+	packLine:SetPoint("TOPLEFT", pullTitle, "BOTTOMLEFT", 0, -2)
+	packLine:SetPoint("TOPRIGHT", pullTitle, "BOTTOMRIGHT", 0, -2)
 	packLine:SetJustifyH("LEFT")
 	packLine:SetTextColor(0.7, 0.7, 0.7)
+	packLine:SetWordWrap(false)
 
-	-- progress (per-mob kill counts) — sits above note
-	progressHeader = frame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-	progressHeader:SetPoint("TOPLEFT", 16, -138)
-	progressHeader:SetJustifyH("LEFT")
-	progressHeader:SetText("")
-
-	-- invisible anchor that progress line pool stacks below; note + scroll anchor to it
-	progressAnchor = CreateFrame("Frame", nil, frame)
-	progressAnchor:SetPoint("TOPLEFT", progressHeader, "BOTTOMLEFT", 0, 0)
-	progressAnchor:SetPoint("RIGHT", frame, "RIGHT", -16, 0)
-	progressAnchor:SetHeight(1)
-
-	-- note box
-	noteBox = frame:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
-	noteBox:SetPoint("TOPLEFT", progressAnchor, "BOTTOMLEFT", 0, -8)
-	noteBox:SetPoint("RIGHT", frame, "RIGHT", -16, 0)
-	noteBox:SetJustifyH("LEFT")
-	noteBox:SetJustifyV("TOP")
-	noteBox:SetWordWrap(true)
-
-	-- Upcoming pulls preview — fixed slab at the bottom. The scroll frame above
-	-- ends at its top so they don't overlap.
-	upcomingContainer = CreateFrame("Frame", nil, frame)
-	upcomingContainer:SetPoint("BOTTOMLEFT", frame, "BOTTOMLEFT", 14, 14)
-	upcomingContainer:SetPoint("BOTTOMRIGHT", frame, "BOTTOMRIGHT", -14, 14)
-	upcomingContainer:SetHeight(UPCOMING_HEIGHT)
-	local uSep = upcomingContainer:CreateTexture(nil, "BACKGROUND")
-	uSep:SetColorTexture(1, 1, 1, 0.08)
-	uSep:SetPoint("TOPLEFT", 0, 1)
-	uSep:SetPoint("TOPRIGHT", 0, 1)
-	uSep:SetHeight(1)
-
-	upcomingHeader = upcomingContainer:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-	upcomingHeader:SetPoint("TOPLEFT", 2, -2)
-	upcomingHeader:SetText("Upcoming")
-
-	-- assignments container (scroll)
-	local scroll = CreateFrame("ScrollFrame", nil, frame, "UIPanelScrollFrameTemplate")
-	scroll:SetPoint("TOPLEFT", noteBox, "BOTTOMLEFT", -4, -24)
-	scroll:SetPoint("BOTTOMRIGHT", upcomingContainer, "TOPRIGHT", -18, 4)
-
-	content = CreateFrame("Frame", nil, scroll)
-	content:SetSize(1, 1)
-	scroll:SetScrollChild(content)
-	frame._scroll = scroll
-
+	-- empty-state message (centered)
 	emptyMsg = frame:CreateFontString(nil, "OVERLAY", "GameFontDisableLarge")
 	emptyMsg:SetPoint("CENTER")
 	emptyMsg:SetText("No plan imported.\nUse Import… to paste a crp1. string.")
 	emptyMsg:SetJustifyH("CENTER")
 	emptyMsg:Hide()
 
-	-- Resize grip (bottom-right corner). StartSizing drives the frame resize;
-	-- OnSizeChanged below keeps the scroll child width in sync during the drag.
+	-- scroll: holds all sections (Pull Notes, Kill Progress, Assignments, Upcoming)
+	local scroll = CreateFrame("ScrollFrame", nil, frame, "UIPanelScrollFrameTemplate")
+	scroll:SetPoint("TOPLEFT", packLine, "BOTTOMLEFT", -4, -10)
+	scroll:SetPoint("BOTTOMRIGHT", -28, 18)
+
+	content = CreateFrame("Frame", nil, scroll)
+	content:SetSize(1, 1)
+	scroll:SetScrollChild(content)
+	frame._scroll = scroll
+
 	local grip = CreateFrame("Button", nil, frame)
 	grip:SetSize(16, 16)
 	grip:SetPoint("BOTTOMRIGHT", -4, 4)
 	grip:SetNormalTexture("Interface\\ChatFrame\\UI-ChatIM-SizeGrabber-Up")
 	grip:SetHighlightTexture("Interface\\ChatFrame\\UI-ChatIM-SizeGrabber-Highlight")
 	grip:SetPushedTexture("Interface\\ChatFrame\\UI-ChatIM-SizeGrabber-Down")
-	grip:SetScript("OnMouseDown", function()
-		frame:StartSizing("BOTTOMRIGHT")
-	end)
+	grip:SetScript("OnMouseDown", function() frame:StartSizing("BOTTOMRIGHT") end)
 	grip:SetScript("OnMouseUp", function()
 		frame:StopMovingOrSizing()
 		saveSize()
+		Window:Refresh()
 	end)
 
 	frame:SetScript("OnSizeChanged", function()
 		if frame._scroll and content then
 			content:SetWidth(frame._scroll:GetWidth())
 		end
+		-- Live-refresh during drag so column widths track the resize, not just
+		-- at mouse-up. Refresh is cheap (re-anchors a few dozen pooled rows)
+		-- and doesn't mutate frame size, so no recursion risk.
+		Window:Refresh()
 	end)
 
 	buildPullPopup()
 end
+
+-- ----- pull display helpers (unchanged) --------------------------------------
 
 local function packNames(pull)
 	local names = {}
@@ -451,13 +530,8 @@ local function packNames(pull)
 	return table.concat(names, ", ")
 end
 
--- Compact mob summary for the upcoming-pulls strip. Pull names are usually
--- meaningless ("Pull 7"), so we show what's actually in the pull. NPC names
--- are trimmed to the last word ("Nether Scryer" → "Scryer", "Apprentice Star
--- Scryer" → "Scryer") so several entries fit in the row.
 local function shortNpcName(name)
 	if not name or name == "" then return nil end
-	-- Match the last whitespace-delimited token. %S+ at end of string.
 	return name:match("(%S+)%s*$") or name
 end
 
@@ -484,15 +558,11 @@ local function pullMobSummary(pull)
 	end)
 	local parts = {}
 	for _, name in ipairs(order) do
-		parts[#parts + 1] = counts[name] .. "× " .. name
+		parts[#parts + 1] = counts[name] .. "x " .. name
 	end
 	return table.concat(parts, ", ")
 end
 
--- Mirror the web UI: if any pack in the pull is a boss (has a slug), show the
--- boss name(s) instead of the user-set pull name. Bosses are the meaningful
--- label for a pull; "Pull 7" buried among trash is less informative than
--- "Hydross + Lurker" when you're skimming the list.
 local function pullDisplayName(pull)
 	local bossNames = {}
 	for _, packId in ipairs(pull.packIds or {}) do
@@ -505,19 +575,12 @@ local function pullDisplayName(pull)
 	return pull.name or "Pull"
 end
 
--- Return an ordered list of progress rows for the current pull. Each row is
--- either { kind="fixed", npcId, need, killed } (single-mob requirement) or
--- { kind="pool", npcIds=[...], need, killed, sortKey } (variable pack).
--- Fixed entries with the same npcId across packs are coalesced.
+-- Kill progress rows. Same shape as before: { kind="fixed" | "pool", ... }.
 local function progressEntries(pull)
 	local slots = CRP.Plan:SlotsForPull(pull)
 	if #slots == 0 then return {} end
 	local kills = (CRP.Tracker and CRP.Tracker:Kills()) or {}
-	-- Use the matcher's greedy assignment so displayed killed/need matches what
-	-- the matcher considers satisfied — otherwise overlapping fixed+pool slots
-	-- can show numbers that double-count a kill.
 	local consumed = CRP.Tracker:AssignKillsToSlots(slots, kills)
-	-- Aggregate fixed slots by npcId so multi-pack pulls show one row per mob.
 	local fixedByNpc = {}
 	local poolEntries = {}
 	for i, s in ipairs(slots) do
@@ -550,9 +613,7 @@ local function progressEntries(pull)
 	for _, row in pairs(fixedByNpc) do entries[#entries + 1] = row end
 	for _, row in ipairs(poolEntries) do entries[#entries + 1] = row end
 	table.sort(entries, function(a, b)
-		if a.killed ~= b.killed then
-			return a.killed > b.killed
-		end
+		if a.killed ~= b.killed then return a.killed > b.killed end
 		local ak = a.kind == "pool" and a.sortKey or a.npcId
 		local bk = b.kind == "pool" and b.sortKey or b.npcId
 		return ak < bk
@@ -560,174 +621,51 @@ local function progressEntries(pull)
 	return entries
 end
 
--- Pull a progress line from the pool (lazy create).
-local function getProgressLine(i)
-	local line = progressLines[i]
-	if not line then
-		line = frame:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-		line:SetPoint("LEFT", progressAnchor, "LEFT", 0, 0)
-		line:SetPoint("RIGHT", progressAnchor, "RIGHT", 0, 0)
-		line:SetJustifyH("LEFT")
-		progressLines[i] = line
-	end
-	return line
-end
+-- ----- view-mode chrome ------------------------------------------------------
 
--- Upcoming row factory. One row per preview slot; icons pooled inside the row.
-local function makeUpcomingRow(parent)
-	local row = CreateFrame("Button", nil, parent)
-	row:SetHeight(UPCOMING_ROW_H)
-
-	local bg = row:CreateTexture(nil, "BACKGROUND")
-	bg:SetAllPoints()
-	bg:SetColorTexture(1, 1, 1, 0)
-	row.bg = bg
-	row:SetScript("OnEnter", function(s)
-		s.bg:SetColorTexture(1, 1, 1, 0.08)
-	end)
-	row:SetScript("OnLeave", function(s)
-		s.bg:SetColorTexture(1, 1, 1, 0)
-	end)
-
-	local num = row:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
-	num:SetPoint("LEFT", 2, 0)
-	num:SetWidth(22)
-	num:SetJustifyH("RIGHT")
-	row.num = num
-
-	local name = row:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-	name:SetPoint("LEFT", num, "RIGHT", 6, 0)
-	name:SetJustifyH("LEFT")
-	row.name = name
-
-	row.icons = {}
-	return row
-end
-
-local function upcomingIcon(row, slot)
-	local icon = row.icons[slot]
-	if not icon then
-		icon = row:CreateTexture(nil, "ARTWORK")
-		icon:SetSize(UPCOMING_ICON, UPCOMING_ICON)
-		icon:SetPoint("RIGHT", row, "RIGHT", -((slot - 1) * (UPCOMING_ICON + 2)) - 2, 0)
-		row.icons[slot] = icon
-	end
-	return icon
-end
-
-local function updateUpcoming(curIdx, pulls, my)
-	upcomingContainer:Show()
-	for offset = 1, UPCOMING_COUNT do
-		local upIdx = curIdx + offset
-		local row = upcomingRows[offset]
-		if not row then
-			row = makeUpcomingRow(upcomingContainer)
-			upcomingRows[offset] = row
-		end
-		row:ClearAllPoints()
-		row:SetPoint("TOPLEFT", upcomingContainer, "TOPLEFT", 0, -UPCOMING_HEADER_H - (offset - 1) * UPCOMING_ROW_H)
-		row:SetPoint("TOPRIGHT", upcomingContainer, "TOPRIGHT", 0, -UPCOMING_HEADER_H - (offset - 1) * UPCOMING_ROW_H)
-
-		local pull = pulls[upIdx]
-		if not pull then
-			row:Hide()
-		else
-			row.num:SetText(tostring(upIdx))
-			row.name:SetText(pullMobSummary(pull))
-
-			local rel = {}
-			for _, a in ipairs(pull.assignments or {}) do
-				if hasContent(a) and (not my or isMyAssignment(a)) then
-					rel[#rel + 1] = a
-					if #rel >= UPCOMING_MAX_ICONS then
-						break
-					end
-				end
-			end
-			for i, a in ipairs(rel) do
-				local icon = upcomingIcon(row, i)
-				local _, texture = resolveAssignment(a)
-				icon:SetTexture(texture)
-				icon:Show()
-			end
-			for i = #rel + 1, #row.icons do
-				row.icons[i]:Hide()
-			end
-
-			-- Jump-to-pull on click; disabled in My view so a non-RL doesn't
-			-- desync their own client (same reasoning as hiding prev/next).
-			if my then
-				row:SetScript("OnClick", nil)
-				row:EnableMouse(false)
-			else
-				row:EnableMouse(true)
-				row:SetScript("OnClick", function()
-					CRP.Plan:SetCurrentPullIdx(upIdx)
-				end)
-			end
-			row:Show()
-		end
-	end
-end
-
--- Show/hide chrome based on the current view mode. Called once after build
--- and again on every toggle.
 function Window:ApplyMode()
-	if not frame then
-		return
-	end
+	if not frame then return end
 	local my = isMyView()
 	local saved = my and CRP.db.char.window.mySize or CRP.db.char.window.raidSize
 	local w = (saved and saved.w) or (my and MY_W or RAID_W)
 	local h = (saved and saved.h) or (my and MY_H or RAID_H)
 	frame:SetSize(w, h)
 	modeBtn:SetText(my and "Raid view" or "My view")
-	-- Controls hidden in My view — they're only relevant to the raid leader.
-	-- (prev/next stay hidden too; a non-RL advancing their own client desyncs them.)
+	-- Whole nav strip is for raid-leader actions; hide its children in My view.
 	for _, btn in ipairs({ prevBtn, nextBtn, pullCounter, pushBtn, importBtn }) do
-		if my then
-			btn:Hide()
-		else
-			btn:Show()
-		end
-	end
-	if my then
-		bossLine:Hide()
-		packLine:Hide()
-		progressHeader:Hide()
-		for _, line in ipairs(progressLines) do
-			line:Hide()
-		end
-	else
-		bossLine:Show()
-		packLine:Show()
-		progressHeader:Show()
+		if my then btn:Hide() else btn:Show() end
 	end
 end
 
+-- ----- layout (Refresh) ------------------------------------------------------
+
+-- Truncation helper. After SetText + SetWidth, compare GetStringWidth (the
+-- measured text width if it weren't clipped) with GetWidth (the cell width).
+-- If text overflows, return true and the caller will surface it in the row
+-- tooltip.
+local function isTruncated(fs)
+	return fs:GetStringWidth() > fs:GetWidth() + 0.5
+end
+
 function Window:Refresh()
-	if not frame then
-		return
-	end
+	if not frame then return end
 	local plan = CRP.Plan:Current()
 	local pulls = CRP.Plan:Pulls()
 	local my = isMyView()
 
+	-- Clear every pool by default; the dispatcher below will Show what it uses.
+	for _, s in ipairs(sectionPool) do s:Hide() end
+	for _, b in ipairs(bulletPool) do b:Hide() end
+	for _, p in ipairs(progressPool) do p:Hide() end
+	for _, r in ipairs(assignPool) do r:Hide() end
+	for _, u in ipairs(upcomingPool) do u:Hide() end
+	if noteParagraph then noteParagraph:Hide() end
+	if tableHeader then tableHeader:Hide() end
+
 	if not plan or #pulls == 0 then
-		pullCounter:SetText("")
 		pullTitle:SetText("")
-		bossLine:SetText("")
 		packLine:SetText("")
-		noteBox:SetText("")
-		for _, row in ipairs(assignRowPool) do
-			row:Hide()
-		end
-		for _, row in ipairs(upcomingRows) do
-			row:Hide()
-		end
-		if upcomingContainer then
-			upcomingContainer:Hide()
-		end
+		if pullCounter then pullCounter:SetText("") end
 		content:SetHeight(1)
 		emptyMsg:Show()
 		return
@@ -737,115 +675,272 @@ function Window:Refresh()
 	local idx = CRP.Plan:CurrentPullIdx()
 	local pull = pulls[idx]
 	pullCounter:SetText(string.format("Pull %d / %d", idx, #pulls))
-	-- In My view the nav strip is hidden, so inline the counter into the title.
+
+	-- Header text. In My view the nav strip is hidden so we inline the counter
+	-- into the title; in Raid view the counter lives in the nav strip.
 	if my then
-		pullTitle:SetText(string.format("Pull %d/%d — %s", idx, #pulls, pull.name or ""))
+		pullTitle:SetText(string.format("Pull %d/%d — %s", idx, #pulls, pullDisplayName(pull)))
 	else
-		pullTitle:SetText(pull.name or "")
+		pullTitle:SetText(pullDisplayName(pull))
+	end
+	local pn = packNames(pull)
+	packLine:SetText(pn ~= "" and ("Packs: " .. pn) or "")
+
+	-- Content width drives every cell's SetWidth. Read from the scroll frame
+	-- since `content` itself may not yet be sized this frame.
+	local W = frame._scroll and frame._scroll:GetWidth() or RAID_W - 30
+	if W < 1 then W = RAID_W - 30 end
+	content:SetWidth(W)
+
+	-- Layout cursor (pixels from content top, growing downward as positive y).
+	local y = 0
+	local sIdx, bIdx, pIdx, aIdx, uIdx = 0, 0, 0, 0, 0
+
+	local function placeSection(titleText)
+		sIdx = sIdx + 1
+		local s = getSection(sIdx)
+		s:ClearAllPoints()
+		s:SetPoint("TOPLEFT", content, "TOPLEFT", 0, -y)
+		s:SetPoint("TOPRIGHT", content, "TOPRIGHT", 0, -y)
+		s.label:SetText(titleText)
+		s:Show()
+		y = y + SECTION_HEADER_H + 2
 	end
 
-	-- Re-anchor noteBox explicitly each refresh so sections hidden in My view
-	-- don't leave stale chained-anchor positions. In Raid view noteBox sits
-	-- below the last progress line; in My view it sits right under pullTitle.
-	noteBox:ClearAllPoints()
-	noteBox:SetPoint("RIGHT", frame, "RIGHT", -16, 0)
-
-	if not my then
-		-- Bosses are packs with a slug/icon under the v3 envelope. Collect any
-		-- such pack names in this pull and render them on the boss line.
-		local bossNames = {}
-		for _, packId in ipairs(pull.packIds or {}) do
-			local pack = CRP.Plan:PackById(packId)
-			if pack and pack.slug then
-				bossNames[#bossNames + 1] = pack.name or pack.slug
-			end
-		end
-		bossLine:SetText(#bossNames > 0 and ("Boss: " .. table.concat(bossNames, ", ")) or "")
-
-		local pn = packNames(pull)
-		packLine:SetText(pn ~= "" and ("Packs: " .. pn) or "")
-
-		local entries = progressEntries(pull)
-		progressHeader:SetText(#entries == 0 and "" or "Kill progress:")
-		local y = -14
-		for i, e in ipairs(entries) do
-			local line = getProgressLine(i)
-			line:ClearAllPoints()
-			line:SetPoint("TOPLEFT", progressHeader, "BOTTOMLEFT", 0, y)
-			line:SetPoint("RIGHT", frame, "RIGHT", -16, 0)
-			local done = e.killed >= e.need
-			local color = done and "|cff7fff7f" or "|cffffffff"
-			local label
-			if e.kind == "pool" then
-				local names = {}
-				for _, nid in ipairs(e.npcIds) do
-					names[#names + 1] = CRP.Plan:NpcName(nid) or ("#" .. nid)
-				end
-				label = "pool: " .. table.concat(names, ", ")
-			else
-				label = CRP.Plan:NpcName(e.npcId) or ("npc #" .. e.npcId)
-			end
-			line:SetText(string.format("  %s%d/%d|r  %s", color, e.killed, e.need, label))
-			line:Show()
-			y = y - 14
-		end
-		for i = #entries + 1, #progressLines do
-			progressLines[i]:Hide()
-		end
-
-		-- If there were progress lines, y is (initial -14) - 14*count, pointing
-		-- just below the last line. If none, leave a gap below progressHeader.
-		local offset = (#entries > 0) and (y - 8) or -8
-		noteBox:SetPoint("TOPLEFT", progressHeader, "BOTTOMLEFT", 0, offset)
-	else
-		noteBox:SetPoint("TOPLEFT", pullTitle, "BOTTOMLEFT", 0, -6)
-	end
-
-	noteBox:SetText(pull.note or "")
-
-	-- Filter assignments: skip blank rows, then apply My-view filter.
-	local shown = {}
+	-- ---- Section: Pull Notes ----
+	local noteText = pull.note or ""
+	local reminders = {}
 	for _, a in ipairs(pull.assignments or {}) do
-		if hasContent(a) and (not my or isMyAssignment(a)) then
-			shown[#shown + 1] = a
+		if a.kind == "reminder" and hasContent(a) and (not my or isMyAssignment(a)) then
+			reminders[#reminders + 1] = a
+		end
+	end
+	if noteText ~= "" or #reminders > 0 then
+		placeSection("Pull Notes")
+		if noteText ~= "" then
+			local np = getNoteParagraph()
+			np:ClearAllPoints()
+			np:SetPoint("TOPLEFT", content, "TOPLEFT", 10, -y)
+			np:SetWidth(W - 14)
+			np:SetText(noteText)
+			np:Show()
+			y = y + math.max(14, np:GetStringHeight()) + 4
+		end
+		for _, r in ipairs(reminders) do
+			bIdx = bIdx + 1
+			local b = getBullet(bIdx)
+			b:ClearAllPoints()
+			b:SetPoint("TOPLEFT", content, "TOPLEFT", 10, -y)
+			b:SetWidth(W - 14)
+			b:SetText("- " .. (r.text or ""))
+			b:Show()
+			y = y + math.max(12, b:GetStringHeight()) + BULLET_GAP
+		end
+		y = y + SECTION_GAP
+	end
+
+	-- ---- Section: Kill Progress (raid view only) ----
+	if not my then
+		local entries = progressEntries(pull)
+		if #entries > 0 then
+			placeSection("Kill Progress")
+			for _, e in ipairs(entries) do
+				pIdx = pIdx + 1
+				local row = getProgressRow(pIdx)
+				row:ClearAllPoints()
+				row:SetPoint("TOPLEFT", content, "TOPLEFT", 10, -y)
+				row:SetWidth(W - 14)
+				local done = e.killed >= e.need
+				local color = done and "|cff7fff7f" or "|cffffffff"
+				local label
+				if e.kind == "pool" then
+					local names = {}
+					for _, nid in ipairs(e.npcIds) do
+						names[#names + 1] = CRP.Plan:NpcName(nid) or ("#" .. nid)
+					end
+					label = "pool: " .. table.concat(names, ", ")
+				else
+					label = CRP.Plan:NpcName(e.npcId) or ("npc #" .. e.npcId)
+				end
+				row:SetText(string.format("%s%d/%d|r  %s", color, e.killed, e.need, label))
+				row:Show()
+				y = y + PROGRESS_ROW_H
+			end
+			y = y + SECTION_GAP
 		end
 	end
 
-	for i, a in ipairs(shown) do
-		local row = assignRowPool[i]
-		if not row then
-			row = makeAssignRow(content)
-			assignRowPool[i] = row
+	-- ---- Section: Assignments (3-column table, reminders excluded) ----
+	local nonReminder = {}
+	for _, a in ipairs(pull.assignments or {}) do
+		if a.kind ~= "reminder" and hasContent(a) and (not my or isMyAssignment(a)) then
+			nonReminder[#nonReminder + 1] = a
 		end
-		row:ClearAllPoints()
-		row:SetPoint("TOPLEFT", content, "TOPLEFT", 0, -(i - 1) * ROW_H)
-		row:SetPoint("RIGHT", content, "RIGHT", 0, 0)
+	end
+	if #nonReminder > 0 then
+		placeSection("Assignments")
 
-		local name, icon = resolveAssignment(a)
-		row.icon:SetTexture(icon)
-		row.name:SetText(name or string.format("%s #%d", a.kind or "?", a.id or 0))
-		local player = a.player or ""
-		-- In My view we don't show the player prefix (it'd always be "me"). Show
-		-- only the note, if any.
-		if not my and player ~= "" then
-			local note = a.note or ""
-			if note ~= "" then
-				row.note:SetText(string.format("|cffc084fc%s:|r %s", player, note))
-			else
-				row.note:SetText(string.format("|cffc084fc%s|r", player))
+		-- Column geometry derived from current content width. In Raid view we
+		-- have three columns; in My view the Assignee column is hidden (every
+		-- row is implicitly mine and the player name would be redundant) and
+		-- its space is given to Target.
+		local pad = 4
+		local gap = 6
+		local cAbility, cTarget, cAssignee
+		if my then
+			local avail = W - pad - ICON_W - gap - gap - pad
+			cAbility = COL_ABILITY_MIN
+			cTarget = math.max(COL_TARGET_MIN, avail - cAbility)
+			cAssignee = 0
+			-- Distribute any extra: 25% ability, 75% target.
+			local extra = (avail - cAbility - COL_TARGET_MIN)
+			if extra > 0 then
+				cAbility = COL_ABILITY_MIN + math.floor(extra * 0.25)
+				cTarget = avail - cAbility
 			end
 		else
-			row.note:SetText(a.note or "")
+			local avail = W - pad - ICON_W - gap - gap - gap - pad
+			cAbility = COL_ABILITY_MIN
+			cTarget = COL_TARGET_MIN
+			cAssignee = avail - cAbility - cTarget
+			if cAssignee < COL_ASSIGNEE_MIN then
+				-- Window too narrow: steal from target first, then ability.
+				local deficit = COL_ASSIGNEE_MIN - cAssignee
+				local takeFromTarget = math.min(deficit, cTarget - 40)
+				cTarget = cTarget - takeFromTarget
+				deficit = deficit - takeFromTarget
+				if deficit > 0 then
+					cAbility = math.max(60, cAbility - deficit)
+				end
+				cAssignee = COL_ASSIGNEE_MIN
+			else
+				-- Extra space: split across all three columns. Bias toward
+				-- assignee since it carries the longest free-text content.
+				local extra = cAssignee - COL_ASSIGNEE_MIN
+				local addAbility = math.floor(extra * 0.15)
+				local addTarget = math.floor(extra * 0.25)
+				cAbility = cAbility + addAbility
+				cTarget = cTarget + addTarget
+				cAssignee = cAssignee - addAbility - addTarget
+			end
 		end
-		row:Show()
-	end
-	for i = #shown + 1, #assignRowPool do
-		assignRowPool[i]:Hide()
-	end
-	content:SetHeight(math.max(1, #shown * ROW_H))
-	content:SetWidth(frame._scroll:GetWidth())
 
-	updateUpcoming(idx, pulls, my)
+		-- Header row
+		local hRow = ensureTableHeader()
+		hRow:ClearAllPoints()
+		hRow:SetPoint("TOPLEFT", content, "TOPLEFT", pad, -y)
+		hRow:SetPoint("TOPRIGHT", content, "TOPRIGHT", -pad, -y)
+		hRow.ability:ClearAllPoints()
+		hRow.ability:SetPoint("LEFT", hRow, "LEFT", ICON_W + gap, 0)
+		hRow.ability:SetWidth(cAbility)
+		hRow.target:ClearAllPoints()
+		hRow.target:SetPoint("LEFT", hRow.ability, "RIGHT", gap, 0)
+		hRow.target:SetWidth(cTarget)
+		if my then
+			hRow.assignee:Hide()
+		else
+			hRow.assignee:ClearAllPoints()
+			hRow.assignee:SetPoint("LEFT", hRow.target, "RIGHT", gap, 0)
+			hRow.assignee:SetWidth(cAssignee)
+			hRow.assignee:Show()
+		end
+		hRow:Show()
+		y = y + 14
+
+		local function anchorCell(cell, leftAnchor, leftRel, leftOffset, width)
+			cell:ClearAllPoints()
+			cell:SetPoint("LEFT", leftAnchor, leftRel, leftOffset, 0)
+			cell:SetPoint("TOP", cell:GetParent(), "TOP", 0, 0)
+			cell:SetPoint("BOTTOM", cell:GetParent(), "BOTTOM", 0, 0)
+			cell:SetWidth(width)
+		end
+
+		for _, a in ipairs(nonReminder) do
+			aIdx = aIdx + 1
+			local row = getAssignRow(aIdx)
+			row:ClearAllPoints()
+			row:SetPoint("TOPLEFT", content, "TOPLEFT", pad, -y)
+			row:SetPoint("TOPRIGHT", content, "TOPRIGHT", -pad, -y)
+
+			local icon, ability, target = resolveAssignmentRow(a)
+			row.icon:SetTexture(icon or ICON_FALLBACK)
+
+			anchorCell(row.ability, row, "LEFT", ICON_W + gap, cAbility)
+			row.ability.fs:SetText(ability)
+			row.ability._tip = ability ~= "" and ability or nil
+
+			anchorCell(row.target, row.ability, "RIGHT", gap, cTarget)
+			row.target.fs:SetText(target)
+			row.target._tip = target ~= "" and target or nil
+
+			-- Assignee cell. Hidden in My view (every row is me; per-assignment
+			-- notes still surface — the assignee cell's tooltip carries the note
+			-- when present, so hovering the (now hidden) area does nothing but
+			-- hovering the row's ability cell can fall back to the note via the
+			-- ability tooltip if we want. For now: in My view we tuck the note
+			-- into the ability cell's tooltip.
+			local player = a.player or ""
+			local note = a.note or ""
+			if my then
+				row.assignee:Hide()
+				if note ~= "" then
+					row.ability._tip = ability .. "\n\n" .. note
+				end
+			else
+				local parts = {}
+				if player ~= "" then
+					parts[#parts + 1] = string.format("|cffc084fc%s|r", player)
+				end
+				if note ~= "" then parts[#parts + 1] = note end
+				local assigneeText
+				if player ~= "" and note ~= "" then
+					assigneeText = string.format("|cffc084fc%s:|r %s", player, note)
+				elseif player ~= "" then
+					assigneeText = string.format("|cffc084fc%s|r", player)
+				else
+					assigneeText = note
+				end
+				anchorCell(row.assignee, row.target, "RIGHT", gap, cAssignee)
+				row.assignee.fs:SetText(assigneeText)
+				row.assignee._tip = (#parts > 0) and table.concat(parts, "\n") or nil
+				row.assignee:Show()
+			end
+
+			row:Show()
+			y = y + ASSIGN_ROW_H
+		end
+		y = y + SECTION_GAP
+	end
+
+	-- ---- Section: Upcoming (raid view only) ----
+	if not my then
+		local previews = {}
+		for offset = 1, 3 do
+			local up = pulls[idx + offset]
+			if up then previews[#previews + 1] = { i = idx + offset, pull = up } end
+		end
+		if #previews > 0 then
+			placeSection("Upcoming")
+			for _, p in ipairs(previews) do
+				uIdx = uIdx + 1
+				local row = getUpcomingRow(uIdx)
+				row:ClearAllPoints()
+				row:SetPoint("TOPLEFT", content, "TOPLEFT", 2, -y)
+				row:SetPoint("TOPRIGHT", content, "TOPRIGHT", -2, -y)
+				row.num:SetText(tostring(p.i))
+				local summary = pullMobSummary(p.pull)
+				row.name:SetText(summary)
+				row._tip = isTruncated(row.name) and summary or nil
+				row:EnableMouse(true)
+				row:SetScript("OnClick", function() CRP.Plan:SetCurrentPullIdx(p.i) end)
+				row:Show()
+				y = y + UPCOMING_ROW_H
+			end
+			y = y + SECTION_GAP
+		end
+	end
+
+	content:SetHeight(math.max(1, y))
 	refreshPullPopupRows()
 end
 
@@ -860,9 +955,7 @@ function Window:Show()
 end
 
 function Window:Hide()
-	if frame then
-		frame:Hide()
-	end
+	if frame then frame:Hide() end
 end
 
 function Window:Toggle()
@@ -873,7 +966,6 @@ function Window:Toggle()
 	end
 end
 
--- GET_ITEM_INFO_RECEIVED handler — refresh if any pending item just loaded.
 function Window:OnItemInfoReceived(itemId, ok)
 	if ok and pendingItemIds[itemId] then
 		pendingItemIds[itemId] = nil
@@ -881,17 +973,17 @@ function Window:OnItemInfoReceived(itemId, ok)
 	end
 end
 
--- Scrollable jump-to-pull popup. Created eagerly in build() and refreshed in
--- Window:Refresh so it's always populated and sized before the first click.
+-- ----- pull popup (jump-to-pull menu, unchanged) -----------------------------
+
 local pullPopup, pullPopupRowPool, pullPopupContent, pullPopupScroll
-local PULL_POPUP_W, PULL_POPUP_H = 180, 200
+local PULL_POPUP_W, PULL_POPUP_H = 200, 220
 local PULL_POPUP_ROW_H = 16
 
 function buildPullPopup()
 	pullPopup = CreateFrame("Frame", "CafeRaidPlannerPullPopup", UIParent, "BackdropTemplate")
 	pullPopup:SetFrameStrata("TOOLTIP")
 	pullPopup:SetSize(PULL_POPUP_W, PULL_POPUP_H)
-	pullPopup:SetPoint("CENTER") -- temporary; re-anchored on each show
+	pullPopup:SetPoint("CENTER")
 	pullPopup:EnableMouse(true)
 	pullPopup:Hide()
 	pullPopup:SetBackdrop({
@@ -907,35 +999,23 @@ function buildPullPopup()
 	pullPopupScroll:SetPoint("TOPLEFT", 8, -8)
 	pullPopupScroll:SetPoint("BOTTOMRIGHT", -28, 8)
 	pullPopupContent = CreateFrame("Frame", nil, pullPopupScroll)
-	-- Scroll child needs an explicit width or row anchors collapse to 1px.
-	-- Popup is fixed-size so scroll width is known at build time.
 	pullPopupContent:SetSize(PULL_POPUP_W - 8 - 28, 1)
 	pullPopupScroll:SetScrollChild(pullPopupContent)
 	pullPopupRowPool = {}
 
-	-- Close on outside click using GLOBAL_MOUSE_DOWN — doesn't consume the click
-	-- so the anchor button can still toggle on its own OnClick.
-	pullPopup:SetScript("OnShow", function(self)
-		self:RegisterEvent("GLOBAL_MOUSE_DOWN")
-	end)
-	pullPopup:SetScript("OnHide", function(self)
-		self:UnregisterEvent("GLOBAL_MOUSE_DOWN")
-	end)
+	pullPopup:SetScript("OnShow", function(self) self:RegisterEvent("GLOBAL_MOUSE_DOWN") end)
+	pullPopup:SetScript("OnHide", function(self) self:UnregisterEvent("GLOBAL_MOUSE_DOWN") end)
 	pullPopup:SetScript("OnEvent", function(self, event)
-		if
-			event == "GLOBAL_MOUSE_DOWN"
+		if event == "GLOBAL_MOUSE_DOWN"
 			and not self:IsMouseOver()
-			and not (pullCounter and pullCounter:IsMouseOver())
-		then
+			and not (pullCounter and pullCounter:IsMouseOver()) then
 			self:Hide()
 		end
 	end)
 end
 
 function refreshPullPopupRows()
-	if not pullPopup then
-		return
-	end
+	if not pullPopup then return end
 	local pulls = CRP.Plan:Pulls()
 	local currentIdx = CRP.Plan:CurrentPullIdx()
 	for i, pull in ipairs(pulls) do
@@ -952,12 +1032,8 @@ function refreshPullPopupRows()
 			text:SetPoint("RIGHT", -6, 0)
 			text:SetJustifyH("LEFT")
 			row.text = text
-			row:SetScript("OnEnter", function(s)
-				s.bg:SetColorTexture(1, 1, 1, 0.12)
-			end)
-			row:SetScript("OnLeave", function(s)
-				s.bg:SetColorTexture(1, 1, 1, 0)
-			end)
+			row:SetScript("OnEnter", function(s) s.bg:SetColorTexture(1, 1, 1, 0.12) end)
+			row:SetScript("OnLeave", function(s) s.bg:SetColorTexture(1, 1, 1, 0) end)
 			row:ClearAllPoints()
 			row:SetPoint("TOPLEFT", pullPopupContent, "TOPLEFT", 0, -(i - 1) * PULL_POPUP_ROW_H)
 			row:SetPoint("RIGHT", pullPopupContent, "RIGHT", 0, 0)
@@ -967,21 +1043,13 @@ function refreshPullPopupRows()
 			CRP.Plan:SetCurrentPullIdx(i)
 			pullPopup:Hide()
 		end)
-		local prefix = (i == currentIdx) and "|cffffd54a▶|r " or "   "
+		local prefix = (i == currentIdx) and "|cffffd54a>|r " or "   "
 		row.text:SetText(string.format("%s%d. %s", prefix, i, pullDisplayName(pull)))
 		row:Show()
 	end
-	for i = #pulls + 1, #pullPopupRowPool do
-		pullPopupRowPool[i]:Hide()
-	end
+	for i = #pulls + 1, #pullPopupRowPool do pullPopupRowPool[i]:Hide() end
 	pullPopupContent:SetHeight(math.max(1, #pulls * PULL_POPUP_ROW_H))
-	-- Recompute scroll range now that content height has changed.
-	if pullPopupScroll.UpdateScrollChildRect then
-		pullPopupScroll:UpdateScrollChildRect()
-	end
-	-- One-time layout warmup. WoW's UIPanelScrollFrameTemplate doesn't fully
-	-- resolve child layout until its parent has been shown at least once;
-	-- without this a first-open popup renders blank until the second click.
+	if pullPopupScroll.UpdateScrollChildRect then pullPopupScroll:UpdateScrollChildRect() end
 	if not pullPopup._warmed then
 		pullPopup._warmed = true
 		pullPopup:Show()
@@ -990,20 +1058,18 @@ function refreshPullPopupRows()
 end
 
 function Window:TogglePullPopup(anchorBtn)
-	if not pullPopup then
-		return
-	end
+	if not pullPopup then return end
 	if pullPopup:IsShown() then
 		pullPopup:Hide()
 		return
 	end
-	-- Refresh here too (not just in Window:Refresh) so the rows are current
-	-- regardless of whether Refresh has run since the last plan change.
 	refreshPullPopupRows()
 	pullPopup:ClearAllPoints()
 	pullPopup:SetPoint("TOPLEFT", anchorBtn, "BOTTOMLEFT", 0, -2)
 	pullPopup:Show()
 end
+
+-- ----- import dialog (unchanged) --------------------------------------------
 
 function Window:ShowImport()
 	if not importDialog then
@@ -1014,12 +1080,8 @@ function Window:ShowImport()
 		importDialog:EnableMouse(true)
 		importDialog:SetMovable(true)
 		importDialog:RegisterForDrag("LeftButton")
-		importDialog:SetScript("OnDragStart", function(s)
-			s:StartMoving()
-		end)
-		importDialog:SetScript("OnDragStop", function(s)
-			s:StopMovingOrSizing()
-		end)
+		importDialog:SetScript("OnDragStart", function(s) s:StartMoving() end)
+		importDialog:SetScript("OnDragStop", function(s) s:StopMovingOrSizing() end)
 		importDialog:SetBackdrop({
 			bgFile = "Interface\\DialogFrame\\UI-DialogBox-Background-Dark",
 			edgeFile = "Interface\\DialogFrame\\UI-DialogBox-Border",
@@ -1033,14 +1095,23 @@ function Window:ShowImport()
 		label:SetPoint("TOPLEFT", 16, -16)
 		label:SetText("Paste a crp1.… string:")
 
-		local scroll =
-			CreateFrame("ScrollFrame", "CafeRaidPlannerImportScroll", importDialog, "InputScrollFrameTemplate")
+		local scroll = CreateFrame(
+			"ScrollFrame", "CafeRaidPlannerImportScroll", importDialog, "InputScrollFrameTemplate")
 		scroll:SetPoint("TOPLEFT", 16, -40)
 		scroll:SetPoint("BOTTOMRIGHT", -32, 60)
 		local edit = scroll.EditBox or _G["CafeRaidPlannerImportScrollEditBox"]
 		if edit then
 			edit:SetMaxLetters(0)
 			edit:SetFontObject("ChatFontSmall")
+			-- InputScrollFrameTemplate's EditBox keeps its template default width
+			-- unless we sync it to the scroll frame; without this the text
+			-- renders in a 1-pixel column and looks like nothing was pasted.
+			-- Keep it synced on resize too in case the dialog grows.
+			local function syncEditWidth()
+				edit:SetWidth(scroll:GetWidth())
+			end
+			syncEditWidth()
+			scroll:HookScript("OnSizeChanged", syncEditWidth)
 		end
 		importDialog.edit = edit
 
@@ -1079,13 +1150,9 @@ function Window:ShowImport()
 		closeBtn:SetSize(80, 22)
 		closeBtn:SetPoint("BOTTOMRIGHT", -16, 8)
 		closeBtn:SetText("Cancel")
-		closeBtn:SetScript("OnClick", function()
-			importDialog:Hide()
-		end)
+		closeBtn:SetScript("OnClick", function() importDialog:Hide() end)
 	end
-	if importDialog.edit then
-		importDialog.edit:SetText("")
-	end
+	if importDialog.edit then importDialog.edit:SetText("") end
 	importDialog.status:SetText("")
 	importDialog:Show()
 end
