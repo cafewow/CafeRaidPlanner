@@ -49,6 +49,39 @@ local upcomingPool = {}
 local tableHeader
 local noteParagraph
 
+-- Chrome fade: title bar, nav, grip, backdrop, scroll bar, plus the Kill
+-- Progress / Upcoming sections all fade out when the mouse leaves the window,
+-- so Pull Notes and Assignments float over the game world unobtrusively.
+-- Hovering anywhere over the window reveals everything again. Static chrome is
+-- registered once in build(); dynamic chrome (kill-progress and upcoming
+-- sections) is re-added each Refresh.
+local CHROME_FADE_IN_SPEED = 8  -- alpha per second on fade-in (snappy reveal)
+local CHROME_FADE_OUT_SPEED = 2 -- slower fade-out so the user has time to react
+local chromeRegions = {}
+local chromeAlpha = 1
+local chromeTarget = 1
+
+local function applyChromeAlpha(a)
+	chromeAlpha = a
+	if frame then
+		-- Neutral tint (1,1,1) preserves the dialog texture's own coloring;
+		-- only the alpha varies so the texture/border fade in and out cleanly.
+		frame:SetBackdropColor(1, 1, 1, a)
+		frame:SetBackdropBorderColor(1, 1, 1, a)
+	end
+	for _, obj in ipairs(chromeRegions) do
+		obj:SetAlpha(a)
+	end
+end
+
+local function resetChrome()
+	for i = #chromeRegions, 1, -1 do chromeRegions[i] = nil end
+end
+
+local function addChrome(obj)
+	if obj then chromeRegions[#chromeRegions + 1] = obj end
+end
+
 local function currentMode()
 	return (CRP.db and CRP.db.char and CRP.db.char.viewMode) or "raid"
 end
@@ -524,12 +557,40 @@ local function build()
 		end
 		frame._refreshDirty = true
 	end)
-	frame:SetScript("OnUpdate", function(self)
+	frame:SetScript("OnUpdate", function(self, dt)
 		if self._refreshDirty then
 			self._refreshDirty = false
 			Window:Refresh()
 		end
+		-- Hover-fade chrome. IsMouseOver covers all descendants, so child
+		-- widgets like the grip and nav buttons count as "still hovering."
+		-- The pull-jump popup is parented to UIParent (so it can outlive a
+		-- click on its anchor), so we hand-pin chrome to visible while it's
+		-- open. Empty-state holds chrome visible so the Import button is
+		-- discoverable on first launch.
+		local sticky = (pullPopup and pullPopup:IsShown())
+			or (emptyMsg and emptyMsg:IsShown())
+		local hovered = self:IsMouseOver() or sticky
+		chromeTarget = hovered and 1 or 0
+		if chromeAlpha ~= chromeTarget then
+			local speed = (chromeTarget > chromeAlpha)
+				and CHROME_FADE_IN_SPEED or CHROME_FADE_OUT_SPEED
+			local step = (dt or 0) * speed
+			if chromeTarget > chromeAlpha then
+				applyChromeAlpha(math.min(chromeTarget, chromeAlpha + step))
+			else
+				applyChromeAlpha(math.max(chromeTarget, chromeAlpha - step))
+			end
+		end
 	end)
+
+	-- Static chrome — everything that should fade with the title bar. The
+	-- chrome list itself is rebuilt every Refresh (so dynamic sections can
+	-- register themselves), with these statics re-added each time.
+	frame._chromeStatic = { title, closeBtn, modeBtn, nav, grip, pullTitle, packLine }
+	if frame._scroll and frame._scroll.ScrollBar then
+		frame._chromeStatic[#frame._chromeStatic + 1] = frame._scroll.ScrollBar
+	end
 
 	buildPullPopup()
 end
@@ -671,7 +732,7 @@ end
 -- frame, and mutates ctx.y / ctx.<pool>Idx. No section needs to know about the
 -- others — they compose by appending to the cursor.
 
-local function placeSection(ctx, titleText)
+local function placeSection(ctx, titleText, chrome)
 	ctx.sIdx = ctx.sIdx + 1
 	local s = getSection(ctx.sIdx)
 	s:ClearAllPoints()
@@ -679,6 +740,7 @@ local function placeSection(ctx, titleText)
 	s:SetPoint("TOPRIGHT", content, "TOPRIGHT", 0, -ctx.y)
 	s.label:SetText(titleText)
 	s:Show()
+	if chrome then addChrome(s) end
 	ctx.y = ctx.y + SECTION_HEADER_H + 2
 end
 
@@ -878,10 +940,11 @@ local function layoutUpcoming(ctx)
 		if up then previews[#previews + 1] = { i = idx + offset, pull = up } end
 	end
 	if #previews == 0 then return end
-	placeSection(ctx, "Upcoming")
+	placeSection(ctx, "Upcoming", true)
 	for _, p in ipairs(previews) do
 		ctx.uIdx = ctx.uIdx + 1
 		local row = getUpcomingRow(ctx.uIdx)
+		addChrome(row)
 		row:ClearAllPoints()
 		row:SetPoint("TOPLEFT", content, "TOPLEFT", 2, -ctx.y)
 		row:SetPoint("TOPRIGHT", content, "TOPRIGHT", -2, -ctx.y)
@@ -911,6 +974,13 @@ function Window:Refresh()
 	for _, u in ipairs(upcomingPool) do u:Hide() end
 	if noteParagraph then noteParagraph:Hide() end
 	if tableHeader then tableHeader:Hide() end
+
+	-- Rebuild chrome list: statics first, then dynamic sections register
+	-- themselves during layout below.
+	resetChrome()
+	if frame._chromeStatic then
+		for _, obj in ipairs(frame._chromeStatic) do addChrome(obj) end
+	end
 
 	if not plan or #pulls == 0 then
 		pullTitle:SetText("")
@@ -957,6 +1027,9 @@ function Window:Refresh()
 	if not my then layoutUpcoming(ctx) end
 
 	content:SetHeight(math.max(1, ctx.y))
+	-- Re-apply current fade alpha so newly added chrome (kill-progress /
+	-- upcoming rows) matches the current hover state on the very next frame.
+	applyChromeAlpha(chromeAlpha)
 	refreshPullPopupRows()
 end
 
