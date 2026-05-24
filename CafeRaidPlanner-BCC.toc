@@ -1,4 +1,4 @@
-## Interface: 20504
+## Interface: 20505
 ## Title: CafeRaidPlanner
 ## Notes: Plan raid cooldowns on a map, like MDT for raids.
 ## Author: Gustaf
