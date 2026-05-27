@@ -127,8 +127,8 @@ function Core:SlashHandler(input)
         CRP.db.char.viewMode = input
         if CRP.ui.Window then CRP.ui.Window:Refresh() end
         self:Print("View mode: " .. input .. ".")
-    elseif input == "hud" then
-        if CRP.HUD then CRP.HUD:ShowOptions() end
+    elseif input == "options" or input == "config" or input == "hud" then
+        if CRP.Options then CRP.Options:Show() end
     elseif input == "hud diag" then
         if CRP.HUD then CRP.HUD:Diagnose() end
     elseif input == "hud test" or input == "hud test on" then

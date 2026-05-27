@@ -16,6 +16,13 @@ local DEFAULTS = {
     spacing = 4,
     scale = 1.0,
     locked = true,
+    enabled = true,
+    direction = "horizontal",   -- "horizontal" | "vertical"
+    -- If an assignment's cooldown has more than this many seconds remaining,
+    -- hide it from the HUD entirely rather than dimming it. Stops things like
+    -- a sapper used on pull 1 from staying on screen across pulls 2/3/4.
+    -- 0 = never hide (always dim with swipe — original behavior).
+    hideThresholdSec = 5,
 }
 
 local function cfg()
@@ -39,6 +46,25 @@ local function itemCooldown(itemId)
     return 0, 0, 1
 end
 
+-- Seconds of cooldown remaining for an assignment, or 0 if none / unknown.
+-- Filters at the GCD floor (1.5s) so a global cooldown blip doesn't read as
+-- "this thing is on cooldown."
+local function cooldownRemaining(a)
+    local s, d
+    if a.kind == "item" or a.kind == "equip" then
+        s, d = itemCooldown(a.id)
+    else
+        local name = GetSpellInfo(a.id)
+        if name then s, d = GetSpellCooldown(name)
+        else         s, d = GetSpellCooldown(a.id) end
+    end
+    if s and d and d > 1.5 then
+        local remain = (s + d) - GetTime()
+        if remain > 0 then return remain end
+    end
+    return 0
+end
+
 -- Tracked from PLAYER_REGEN_DISABLED/ENABLED. We don't trust InCombatLockdown()
 -- inside the REGEN_DISABLED handler — at that exact moment the engine has fired
 -- the event but may not have flipped the lockdown flag yet, so polling it
@@ -51,10 +77,24 @@ local iconPool = {}
 -- (cooldown/bag events) so we don't rebuild the layout on every tick.
 local currentEntries = {}
 
+-- WoW icon textures ship with a ~7% bevel border that looks chunky next to
+-- modern HUDs. Crop it the same way WeakAuras' "zoom" option does, so icons
+-- show only the inner art region.
+local ICON_TEXCOORD = { 0.07, 0.93, 0.07, 0.93 }
+
+local ICON_BORDER = 1
+
 local function createIcon(parent)
     local f = CreateFrame("Frame", nil, parent)
+    -- Black backdrop fills the icon's whole footprint; the art texture insets
+    -- by ICON_BORDER on each side, leaving a clean black frame around it.
+    f.border = f:CreateTexture(nil, "BACKGROUND")
+    f.border:SetAllPoints()
+    f.border:SetColorTexture(0, 0, 0, 1)
     f.tex = f:CreateTexture(nil, "ARTWORK")
-    f.tex:SetAllPoints()
+    f.tex:SetPoint("TOPLEFT", ICON_BORDER, -ICON_BORDER)
+    f.tex:SetPoint("BOTTOMRIGHT", -ICON_BORDER, ICON_BORDER)
+    f.tex:SetTexCoord(ICON_TEXCOORD[1], ICON_TEXCOORD[2], ICON_TEXCOORD[3], ICON_TEXCOORD[4])
     -- CooldownFrameTemplate gives us the standard radial swipe + numeric text
     -- that OmniCC etc. already know how to skin.
     f.cd = CreateFrame("Cooldown", nil, f, "CooldownFrameTemplate")
@@ -80,6 +120,26 @@ local function applyDb()
     frame:SetPoint(c.point, UIParent, c.relPoint, c.x, c.y)
     frame:SetScale(c.scale)
     frame:EnableMouse(not c.locked)
+end
+
+-- Refresh once per second so cooldowns expiring naturally (and entries
+-- crossing the hide-threshold) come back into view without waiting for the
+-- player to take an action. Cooldown events fire on start but aren't reliable
+-- on natural finish; this ticker covers both gaps cheaply. Lives on its own
+-- always-shown frame so it keeps firing even when the HUD frame is hidden
+-- (e.g. all entries currently filtered out by the cooldown threshold).
+local TICKER_INTERVAL = 1.0
+local tickerFrame
+local tickerElapsed = 0
+local function startTicker()
+    if tickerFrame then return end
+    tickerFrame = CreateFrame("Frame")
+    tickerFrame:SetScript("OnUpdate", function(_, elapsed)
+        tickerElapsed = tickerElapsed + elapsed
+        if tickerElapsed < TICKER_INTERVAL then return end
+        tickerElapsed = 0
+        if combatActive or not cfg().locked then HUD:Refresh() end
+    end)
 end
 
 local function ensureFrame()
@@ -131,12 +191,16 @@ local function entriesForPull()
             -- Item/equip assignments only appear if the player actually has
             -- the item in their bags. A grenade you don't carry or a swap
             -- piece you sold off is noise, not a prompt — drop it entirely.
-            -- (On-cooldown-but-in-bags still appears, dimmed with the swipe.)
+            local hasItem = true
             if a.kind == "item" or a.kind == "equip" then
-                if (GetItemCount(a.id) or 0) > 0 then out[#out + 1] = a end
-            else
-                out[#out + 1] = a
+                hasItem = (GetItemCount(a.id) or 0) > 0
             end
+            -- Hide entries whose cooldown still has more than `hideThresholdSec`
+            -- left — a sapper used on pull 1 shouldn't linger on pull 2/3/4.
+            -- Threshold == 0 disables hiding (caller wants the old dim-only UX).
+            local th = cfg().hideThresholdSec or 0
+            local hiddenByCd = th > 0 and cooldownRemaining(a) > th
+            if hasItem and not hiddenByCd then out[#out + 1] = a end
         end
     end
     return out
@@ -189,6 +253,7 @@ local function paintIcon(icon, a)
 end
 
 local function shouldShow()
+    if not cfg().enabled then return false end
     if not cfg().locked then return true end  -- preview while configuring
     -- Out of combat we still want to show equip prompts; the entry-list filter
     -- (entriesForPull) decides what's relevant, and Refresh hides the frame if
@@ -228,12 +293,26 @@ function HUD:Refresh()
         icon.count:Hide()
         icon:Show()
     else
-        frame:SetSize(#entries * size + math.max(0, #entries - 1) * spacing, size)
+        -- Horizontal grows right from the frame's LEFT anchor; vertical grows
+        -- down from TOP. The frame's screen anchor (point/relPoint) is the
+        -- icon row's leading corner either way, so resizing the frame doesn't
+        -- shift where icon #1 lives.
+        local horizontal = c.direction ~= "vertical"
+        local long = #entries * size + math.max(0, #entries - 1) * spacing
+        if horizontal then
+            frame:SetSize(long, size)
+        else
+            frame:SetSize(size, long)
+        end
         for i, a in ipairs(entries) do
             local icon = acquireIcon(i)
             icon:SetSize(size, size)
             icon:ClearAllPoints()
-            icon:SetPoint("LEFT", frame, "LEFT", (i - 1) * (size + spacing), 0)
+            if horizontal then
+                icon:SetPoint("LEFT", frame, "LEFT", (i - 1) * (size + spacing), 0)
+            else
+                icon:SetPoint("TOP", frame, "TOP", 0, -((i - 1) * (size + spacing)))
+            end
             paintIcon(icon, a)
             icon:Show()
         end
@@ -268,6 +347,9 @@ end
 function HUD:SetScale(v)        cfg().scale = v;     applyDb();        self:Refresh() end
 function HUD:SetIconSize(v)     cfg().iconSize = v;                    self:Refresh() end
 function HUD:SetSpacing(v)      cfg().spacing = v;                     self:Refresh() end
+function HUD:SetEnabled(v)      cfg().enabled = v and true or false;   self:Refresh() end
+function HUD:SetDirection(d)    cfg().direction = d == "vertical" and "vertical" or "horizontal"; self:Refresh() end
+function HUD:SetHideThreshold(v) cfg().hideThresholdSec = math.max(0, v or 0); self:Refresh() end
 
 -- Diagnostic: print what the HUD sees in the current pull. Use when icons
 -- aren't appearing and you need to know whether the filter, the data, or the
@@ -305,6 +387,7 @@ end
 local eventFrame
 function HUD:Init()
     cfg()  -- seed defaults into the DB
+    startTicker()
     eventFrame = CreateFrame("Frame")
     eventFrame:RegisterEvent("PLAYER_REGEN_DISABLED")
     eventFrame:RegisterEvent("PLAYER_REGEN_ENABLED")
@@ -335,14 +418,13 @@ function HUD:Init()
             -- the client hadn't cached the item yet; repaint when it arrives.
             HUD:RepaintIcons()
             return
-        elseif ev == "BAG_UPDATE" then
-            -- A bag change can add or remove an entry (e.g. using the last
-            -- grenade), not just affect dim state, so full refresh.
+        else
+            -- BAG_UPDATE can add/remove entries (last grenade consumed).
+            -- SPELL_UPDATE_COOLDOWN / BAG_UPDATE_COOLDOWN can also add/remove
+            -- entries when the hide-on-cooldown threshold is in play. Cheap
+            -- enough at this entry-count scale — always full refresh.
             ok, err = pcall(HUD.Refresh, HUD)
             if not ok then print("|cffff3333CRP HUD error:|r " .. tostring(err)) end
-            return
-        else
-            HUD:RepaintIcons()
         end
     end)
 end
@@ -355,71 +437,4 @@ function HUD:OnPullChanged()
     self:Refresh()
 end
 
--- Tiny AceGUI options dialog. Reuses the lib that's already loaded for the
--- main window, so we don't pull in AceConfig just for four sliders.
-local optionsWindow
-function HUD:ShowOptions()
-    local AceGUI = LibStub and LibStub("AceGUI-3.0", true)
-    if not AceGUI then
-        print("|cffff9933CRP:|r AceGUI-3.0 not available.")
-        return
-    end
-    if optionsWindow then
-        optionsWindow:Show()
-        return
-    end
-    local c = cfg()
-    local w = AceGUI:Create("Frame")
-    optionsWindow = w
-    w:SetTitle("CafeRaidPlanner — Combat HUD")
-    w:SetLayout("Flow")
-    w:SetWidth(360)
-    w:SetHeight(320)
-    w:SetCallback("OnClose", function(widget)
-        optionsWindow = nil
-        AceGUI:Release(widget)
-        -- Re-lock on close so the user doesn't leave a draggable frame behind.
-        HUD:SetLocked(true)
-    end)
-
-    local function fullWidth(widget)
-        widget:SetFullWidth(true)
-        w:AddChild(widget)
-        return widget
-    end
-
-    local lock = AceGUI:Create("CheckBox")
-    lock:SetLabel("Unlock (drag to position)")
-    lock:SetValue(not c.locked)
-    lock:SetCallback("OnValueChanged", function(_, _, v) HUD:SetLocked(not v) end)
-    fullWidth(lock)
-
-    local scale = AceGUI:Create("Slider")
-    scale:SetLabel("Scale")
-    scale:SetSliderValues(0.5, 2.0, 0.05)
-    scale:SetValue(c.scale)
-    scale:SetCallback("OnValueChanged", function(_, _, v) HUD:SetScale(v) end)
-    fullWidth(scale)
-
-    local size = AceGUI:Create("Slider")
-    size:SetLabel("Icon size")
-    size:SetSliderValues(16, 80, 1)
-    size:SetValue(c.iconSize)
-    size:SetCallback("OnValueChanged", function(_, _, v) HUD:SetIconSize(v) end)
-    fullWidth(size)
-
-    local spacing = AceGUI:Create("Slider")
-    spacing:SetLabel("Spacing")
-    spacing:SetSliderValues(0, 20, 1)
-    spacing:SetValue(c.spacing)
-    spacing:SetCallback("OnValueChanged", function(_, _, v) HUD:SetSpacing(v) end)
-    fullWidth(spacing)
-
-    local reset = AceGUI:Create("Button")
-    reset:SetText("Reset position")
-    reset:SetCallback("OnClick", function() HUD:ResetPosition() end)
-    fullWidth(reset)
-
-    -- Open in preview mode so position/size changes are visible immediately.
-    HUD:SetLocked(false)
-end
+-- HUD options live in Options.lua now (shared window with General settings).

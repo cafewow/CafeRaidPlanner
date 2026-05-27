@@ -448,6 +448,17 @@ local function build()
 	-- the button above the title's frame level so its hit area wins.
 	closeBtn:SetFrameLevel(title:GetFrameLevel() + 5)
 
+	-- Options button — gear-style. Sits left of the view-mode toggle. Parented
+	-- to the title bar so its frame level outranks the drag handle.
+	local optBtn = CreateFrame("Button", nil, title, "UIPanelButtonTemplate")
+	optBtn:SetSize(60, 20)
+	optBtn:SetPoint("RIGHT", title, "RIGHT", -124, 0)
+	optBtn:SetFrameLevel(title:GetFrameLevel() + 5)
+	optBtn:SetText("Options")
+	optBtn:SetScript("OnClick", function()
+		if CRP.Options then CRP.Options:Show() end
+	end)
+
 	-- View-mode toggle (parented to title bar so its frame level sits above the
 	-- drag handle and clicks reach it).
 	modeBtn = CreateFrame("Button", nil, title, "UIPanelButtonTemplate")
