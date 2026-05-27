@@ -43,6 +43,10 @@ function Core:OnInitialize()
         CRP.Comms:Init()
     end
 
+    if CRP.HUD and CRP.HUD.Init then
+        CRP.HUD:Init()
+    end
+
     eventFrame = CreateFrame("Frame", "CafeRaidPlannerEventFrame")
     eventFrame:RegisterEvent("GET_ITEM_INFO_RECEIVED")
     eventFrame:RegisterEvent("COMBAT_LOG_EVENT_UNFILTERED")
@@ -123,7 +127,15 @@ function Core:SlashHandler(input)
         CRP.db.char.viewMode = input
         if CRP.ui.Window then CRP.ui.Window:Refresh() end
         self:Print("View mode: " .. input .. ".")
+    elseif input == "hud" then
+        if CRP.HUD then CRP.HUD:ShowOptions() end
+    elseif input == "hud diag" then
+        if CRP.HUD then CRP.HUD:Diagnose() end
+    elseif input == "hud test" or input == "hud test on" then
+        if CRP.HUD then CRP.HUD:SetTestMode(true); self:Print("HUD test mode: on (faking combat).") end
+    elseif input == "hud test off" then
+        if CRP.HUD then CRP.HUD:SetTestMode(false); self:Print("HUD test mode: off.") end
     else
-        self:Print("Usage: /crp [show | import | next | prev | reset | clearkills | push | auto on|off | autoimport on|off | autoshow on|off | my | raid]")
+        self:Print("Usage: /crp [show | import | next | prev | reset | clearkills | push | hud | auto on|off | autoimport on|off | autoshow on|off | my | raid]")
     end
 end

@@ -39,6 +39,9 @@ function Plan:Import(envelope)
     if CRP.Tracker and CRP.Tracker.Clear then
         CRP.Tracker:Clear()     -- new plan → pull uids changed, prior kills meaningless
     end
+    if CRP.HUD and CRP.HUD.OnPullChanged then
+        CRP.HUD:OnPullChanged()
+    end
     return true
 end
 
@@ -102,6 +105,9 @@ function Plan:SetCurrentPullIdx(idx, silent)
 
     if CRP.ui and CRP.ui.Window and CRP.ui.Window.Refresh then
         CRP.ui.Window:Refresh()
+    end
+    if CRP.HUD and CRP.HUD.OnPullChanged then
+        CRP.HUD:OnPullChanged()
     end
     if not silent and prev ~= idx and CRP.Comms and CRP.Comms:CanPush() then
         CRP.Comms:PushPull()

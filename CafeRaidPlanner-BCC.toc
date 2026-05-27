@@ -16,3 +16,4 @@ Plan.lua
 Tracker.lua
 Comms.lua
 UI.lua
+CombatHUD.lua

@@ -125,7 +125,9 @@ end
 --   - player set:   only if it matches me (case-insensitive, realm-stripped)
 --   - player empty: items and reminders always pass (no way to class-filter
 --                   a free-text reminder); spells/kicks only if I know them.
-local function isMyAssignment(a)
+-- Exposed on CRP.ui so the combat HUD can apply the same "is this for me?"
+-- filter the personal view uses, without duplicating knowsSpell/stripRealm.
+function CRP.ui.IsMyAssignment(a)
 	if not a then return false end
 	local player = a.player or ""
 	if player ~= "" then
@@ -749,7 +751,7 @@ local function layoutPullNotes(ctx)
 	local noteText = pull.note or ""
 	local reminders = {}
 	for _, a in ipairs(pull.assignments or {}) do
-		if a.kind == "reminder" and hasContent(a) and (not my or isMyAssignment(a)) then
+		if a.kind == "reminder" and hasContent(a) and (not my or CRP.ui.IsMyAssignment(a)) then
 			reminders[#reminders + 1] = a
 		end
 	end
@@ -848,7 +850,7 @@ local function layoutAssignments(ctx)
 	local pull, my, W = ctx.pull, ctx.my, ctx.W
 	local nonReminder = {}
 	for _, a in ipairs(pull.assignments or {}) do
-		if a.kind ~= "reminder" and hasContent(a) and (not my or isMyAssignment(a)) then
+		if a.kind ~= "reminder" and hasContent(a) and (not my or CRP.ui.IsMyAssignment(a)) then
 			nonReminder[#nonReminder + 1] = a
 		end
 	end
