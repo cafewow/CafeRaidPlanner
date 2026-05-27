@@ -198,8 +198,11 @@ local function entriesForPull()
             -- Hide entries whose cooldown still has more than `hideThresholdSec`
             -- left — a sapper used on pull 1 shouldn't linger on pull 2/3/4.
             -- Threshold == 0 disables hiding (caller wants the old dim-only UX).
+            -- Equip prompts are exempt: on-use trinkets etc. still need a
+            -- swap reminder even while their on-use CD is ticking down — the
+            -- internal CD doesn't represent "this swap is unnecessary."
             local th = cfg().hideThresholdSec or 0
-            local hiddenByCd = th > 0 and cooldownRemaining(a) > th
+            local hiddenByCd = a.kind ~= "equip" and th > 0 and cooldownRemaining(a) > th
             if hasItem and not hiddenByCd then out[#out + 1] = a end
         end
     end
@@ -219,7 +222,11 @@ local function paintIcon(icon, a)
         else
             local s, d = itemCooldown(a.id)
             start, duration = s, d
-            ready = (d or 0) == 0
+            -- GCD (≤1.5s) doesn't count as "on cooldown" for HUD purposes —
+            -- the swipe gate at line ~240 skips it for the same reason, so
+            -- treating it as not-ready here would dim the icon with no visible
+            -- swipe to explain it (every spellcast greys the whole HUD).
+            ready = (d or 0) <= 1.5
         end
     else
         -- Assignment id is rank-specific; query the cooldown by name so we

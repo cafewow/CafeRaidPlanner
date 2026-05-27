@@ -53,6 +53,9 @@ function Plan:Clear()
     if CRP.Tracker and CRP.Tracker.Clear then
         CRP.Tracker:Clear()
     end
+    if CRP.HUD and CRP.HUD.OnPullChanged then
+        CRP.HUD:OnPullChanged()
+    end
 end
 
 function Plan:Pulls()
@@ -78,6 +81,9 @@ function Plan:SetCurrentPullIdx(idx, silent)
     local n = #pulls
     if n == 0 then
         CRP.db.global.currentPullIdx = 1
+        if CRP.HUD and CRP.HUD.OnPullChanged then
+            CRP.HUD:OnPullChanged()
+        end
         return
     end
     if idx < 1 then idx = 1 end
