@@ -83,6 +83,10 @@ local function buildHUD(container)
         function() return not c.locked end,
         function(v) CRP.HUD:SetLocked(not v) end)
 
+    toggle(container, "Only show in raids/dungeons (recommended)",
+        function() return c.instanceOnly ~= false end,
+        function(v) CRP.HUD:SetInstanceOnly(v) end)
+
     local dir = AceGUI:Create("Dropdown")
     dir:SetLabel("Growth direction")
     dir:SetList({ horizontal = "Horizontal", vertical = "Vertical" })

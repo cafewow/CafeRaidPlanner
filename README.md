@@ -38,6 +38,20 @@ rogue doesn't see Innervate. Toggle with the **My view** / **Raid view**
 button in the top-right corner. The window remembers its size and position
 separately per mode.
 
+## Combat HUD
+
+A small icon bar pops up when you enter combat showing just your actionable
+assignments for the current pull — items, spells, on-use trinkets — each
+one with a cooldown swipe and item-count overlay.
+
+- Equip swaps only show between pulls, everything else during combat.
+- Items you don't have in your bags don't appear.
+- Icons whose cooldown still has more than ~5s left (configurable) drop off
+  the bar rather than dimming, so leftovers from earlier pulls don't linger.
+
+Drag it where you want it, scale it, lay it out horizontally or vertically.
+Plays nicely with OmniCC since it uses the standard cooldown template.
+
 ## Using it
 
 1. Build a plan on the [web planner](https://cafewow.github.io/CafeRaidPlanner-Web/),

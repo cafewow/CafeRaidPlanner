@@ -18,6 +18,10 @@ local DEFAULTS = {
     locked = true,
     enabled = true,
     direction = "horizontal",   -- "horizontal" | "vertical"
+    -- Restrict the HUD to raid/dungeon instances. Default on — outside an
+    -- instance, the planner is just a tool, not an active overlay. Toggle off
+    -- for testing on a target dummy in town.
+    instanceOnly = true,
     -- If an assignment's cooldown has more than this many seconds remaining,
     -- hide it from the HUD entirely rather than dimming it. Stops things like
     -- a sapper used on pull 1 from staying on screen across pulls 2/3/4.
@@ -259,9 +263,19 @@ local function paintIcon(icon, a)
     end
 end
 
+-- Tracked from PLAYER_ENTERING_WORLD / ZONE_CHANGED_NEW_AREA. Polling
+-- IsInInstance() inside shouldShow would work, but the cached flag means the
+-- 1-Hz ticker doesn't hit the API every tick.
+local inInstance = false
+local function refreshInstanceFlag()
+    local inside, kind = IsInInstance()
+    inInstance = inside and (kind == "raid" or kind == "party") or false
+end
+
 local function shouldShow()
     if not cfg().enabled then return false end
     if not cfg().locked then return true end  -- preview while configuring
+    if cfg().instanceOnly and not inInstance then return false end
     -- Out of combat we still want to show equip prompts; the entry-list filter
     -- (entriesForPull) decides what's relevant, and Refresh hides the frame if
     -- the resulting list is empty.
@@ -357,6 +371,7 @@ function HUD:SetSpacing(v)      cfg().spacing = v;                     self:Refr
 function HUD:SetEnabled(v)      cfg().enabled = v and true or false;   self:Refresh() end
 function HUD:SetDirection(d)    cfg().direction = d == "vertical" and "vertical" or "horizontal"; self:Refresh() end
 function HUD:SetHideThreshold(v) cfg().hideThresholdSec = math.max(0, v or 0); self:Refresh() end
+function HUD:SetInstanceOnly(v)  cfg().instanceOnly = v and true or false;     self:Refresh() end
 
 -- Diagnostic: print what the HUD sees in the current pull. Use when icons
 -- aren't appearing and you need to know whether the filter, the data, or the
@@ -394,11 +409,13 @@ end
 local eventFrame
 function HUD:Init()
     cfg()  -- seed defaults into the DB
+    refreshInstanceFlag()
     startTicker()
     eventFrame = CreateFrame("Frame")
     eventFrame:RegisterEvent("PLAYER_REGEN_DISABLED")
     eventFrame:RegisterEvent("PLAYER_REGEN_ENABLED")
     eventFrame:RegisterEvent("PLAYER_ENTERING_WORLD")
+    eventFrame:RegisterEvent("ZONE_CHANGED_NEW_AREA")
     eventFrame:RegisterEvent("SPELL_UPDATE_COOLDOWN")
     eventFrame:RegisterEvent("BAG_UPDATE_COOLDOWN")
     eventFrame:RegisterEvent("BAG_UPDATE")
@@ -417,6 +434,12 @@ function HUD:Init()
             return
         elseif ev == "PLAYER_ENTERING_WORLD" then
             combatActive = InCombatLockdown() and true or false
+            refreshInstanceFlag()
+            ok, err = pcall(HUD.Refresh, HUD)
+            if not ok then print("|cffff3333CRP HUD error:|r " .. tostring(err)) end
+            return
+        elseif ev == "ZONE_CHANGED_NEW_AREA" then
+            refreshInstanceFlag()
             ok, err = pcall(HUD.Refresh, HUD)
             if not ok then print("|cffff3333CRP HUD error:|r " .. tostring(err)) end
             return
