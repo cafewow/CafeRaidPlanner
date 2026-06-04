@@ -89,6 +89,7 @@ and CCs, then export a share string. The addon imports that string.
 | `/crp auto on\|off`       | combat-log auto-advance (default on)                     |
 | `/crp autoshow on\|off`   | open window on raid zone-in / incoming plan (default on) |
 | `/crp autoimport on\|off` | skip the import prompt for pushed plans (default off)    |
+| `/crp reveal click\|hover`| reveal the window chrome on click vs. hover (default hover)|
 | `/crp clearkills`         | reset tracked kills without dropping the plan            |
 | `/crp reset`              | drop the plan entirely                                   |
 | `/crp debug on\|off`      | log each UNIT_DIED GUID, for lockout troubleshooting     |

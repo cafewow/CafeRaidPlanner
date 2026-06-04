@@ -52,6 +52,10 @@ local function buildGeneral(container)
         function() return g.autoShow end,
         function(v) g.autoShow = v end)
 
+    toggle(container, "Reveal window chrome on click instead of hover",
+        function() return g.revealOnClick end,
+        function(v) g.revealOnClick = v end)
+
     toggle(container, "Debug: print kill GUIDs to chat",
         function() return g.debug end,
         function(v) g.debug = v end)

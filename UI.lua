@@ -60,6 +60,11 @@ local CHROME_FADE_OUT_SPEED = 2 -- slower fade-out so the user has time to react
 local chromeRegions = {}
 local chromeAlpha = 1
 local chromeTarget = 1
+-- Click-to-reveal mode (CRP.db.global.revealOnClick): chrome stays hidden on
+-- hover alone and only reveals once the user clicks inside the window. `armed`
+-- tracks that click; it clears the moment the mouse leaves so the next reveal
+-- needs a fresh click. Unused in the default hover mode.
+local chromeArmed = false
 
 local function applyChromeAlpha(a)
 	chromeAlpha = a
@@ -583,8 +588,22 @@ local function build()
 		-- discoverable on first launch.
 		local sticky = (pullPopup and pullPopup:IsShown())
 			or (emptyMsg and emptyMsg:IsShown())
-		local hovered = self:IsMouseOver() or sticky
-		chromeTarget = hovered and 1 or 0
+		local over = self:IsMouseOver()
+		local reveal
+		if CRP.db and CRP.db.global and CRP.db.global.revealOnClick then
+			-- Click-to-reveal: arm on any mouse-button press while over the
+			-- window (polled, so it catches clicks even on child widgets that
+			-- swallow the event), disarm the instant the cursor leaves.
+			if not over then
+				chromeArmed = false
+			elseif IsMouseButtonDown("LeftButton") or IsMouseButtonDown("RightButton") then
+				chromeArmed = true
+			end
+			reveal = chromeArmed
+		else
+			reveal = over
+		end
+		chromeTarget = (reveal or sticky) and 1 or 0
 		if chromeAlpha ~= chromeTarget then
 			local speed = (chromeTarget > chromeAlpha)
 				and CHROME_FADE_IN_SPEED or CHROME_FADE_OUT_SPEED

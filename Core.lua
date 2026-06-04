@@ -14,6 +14,7 @@ local defaults = {
         autoAdvance = true,         -- advance current pull when all required mobs die
         autoApplyIncomingPlan = false, -- true → skip receive prompt and apply silently
         autoShow = true,            -- open window on raid zone-in and after importing a pushed plan
+        revealOnClick = false,      -- chrome reveal trigger: false → hover, true → click inside the window
         killLookahead = 3,          -- greedy matcher window: kills overflow into the next N pulls
         trackerState = {            -- persisted kill progress, keyed by instance lockout
             lockoutKey = nil,
@@ -114,6 +115,12 @@ function Core:SlashHandler(input)
     elseif input == "autoshow off" then
         CRP.db.global.autoShow = false
         self:Print("Auto-show window on raid entry / plan import: off.")
+    elseif input == "reveal click" then
+        CRP.db.global.revealOnClick = true
+        self:Print("Window chrome reveals on click.")
+    elseif input == "reveal hover" then
+        CRP.db.global.revealOnClick = false
+        self:Print("Window chrome reveals on hover.")
     elseif input == "push" then
         local ok, err = CRP.Comms:PushPlan()
         if not ok and err then self:Print("Push failed: " .. err) end
@@ -136,6 +143,6 @@ function Core:SlashHandler(input)
     elseif input == "hud test off" then
         if CRP.HUD then CRP.HUD:SetTestMode(false); self:Print("HUD test mode: off.") end
     else
-        self:Print("Usage: /crp [show | import | next | prev | reset | clearkills | push | hud | auto on|off | autoimport on|off | autoshow on|off | my | raid]")
+        self:Print("Usage: /crp [show | import | next | prev | reset | clearkills | push | hud | auto on|off | autoimport on|off | autoshow on|off | reveal click|hover | my | raid]")
     end
 end
