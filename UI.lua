@@ -416,7 +416,10 @@ local function build()
 		frame:SetMaxResize(MAX_W, MAX_H)
 	end
 	frame:EnableMouse(true)
-	frame:SetFrameStrata("HIGH")
+	-- LOW so default UI panels (character sheet, spellbook, bags — all MEDIUM or
+	-- higher) layer on top of the planner instead of being hidden behind it.
+	-- The pull popup and import dialog set their own higher strata below.
+	frame:SetFrameStrata("LOW")
 	frame:SetClampedToScreen(true)
 	frame:Hide()
 	frame:SetBackdrop({
