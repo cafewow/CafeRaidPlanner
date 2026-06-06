@@ -273,7 +273,12 @@ local function paintIcon(icon, a)
         if name then s, d = GetSpellCooldown(name)
         else         s, d = GetSpellCooldown(a.id) end
         start, duration = s, d
-        ready = (d or 0) == 0
+        -- GCD (≤1.5s) isn't "on cooldown" for HUD purposes — same gate as the
+        -- item branch and the swipe below. GetSpellCooldown reports the active
+        -- GCD against every spell while it's ticking, so `== 0` would dim the
+        -- icon on every cast with no swipe to explain it (the symptom: a
+        -- Bloodlust icon flickering light/shadowed as the shaman casts).
+        ready = (d or 0) <= 1.5
     end
     icon.tex:SetTexture(texture or "Interface\\Icons\\INV_Misc_QuestionMark")
     if start and duration and duration > 1.5 then
