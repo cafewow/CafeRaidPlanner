@@ -128,6 +128,34 @@ function Plan:Prev()
     self:SetCurrentPullIdx(self:CurrentPullIdx() - 1)
 end
 
+-- A prep step: authored in the planner with no mobs, surfaced by the HUD
+-- between pulls (out of combat) for buffs / summons / gear swaps. The `prep`
+-- flag rides along in the preset (share format is a JSON passthrough), so it's
+-- present here untouched. We key off the explicit flag rather than "has no
+-- slots" so a misconfigured empty real pull isn't mistaken for prep.
+function Plan:IsPrepPull(pull)
+    return pull ~= nil and pull.prep == true
+end
+
+-- Combat-start advance for prep steps. A mob-less step can't auto-advance on a
+-- kill, so the HUD calls this from PLAYER_REGEN_DISABLED: if the cursor sits on
+-- a prep step (or a consecutive run of them), jump to the first following real
+-- pull so kill tracking and the in-combat HUD reflect what we're actually
+-- fighting. No-op when not on a prep step, or when the run is trailing (no real
+-- pull after it — staying put is harmless). The forward-fill in
+-- SetCurrentPullIdx is a no-op on the skipped prep steps (they have no slots).
+function Plan:AdvancePastPrep()
+    local pulls = self:Pulls()
+    local idx = self:CurrentPullIdx()
+    if not self:IsPrepPull(pulls[idx]) then return end
+    local target = idx
+    while target <= #pulls and self:IsPrepPull(pulls[target]) do
+        target = target + 1
+    end
+    if target > #pulls then return end
+    self:SetCurrentPullIdx(target)
+end
+
 -- Look up a pack by id in the current plan.
 function Plan:PackById(packId)
     return ensurePackIndex()[packId]

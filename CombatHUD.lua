@@ -172,19 +172,49 @@ local function ensureFrame()
     applyDb()
 end
 
+-- Flatten the consecutive run of prep steps starting at `startIdx` into one
+-- assignment list. Prep steps are an unordered between-pull checklist, so the
+-- HUD merges a [prep, prep, ...] run rather than treating each as its own
+-- cursor stop — otherwise the later steps' assignments would never be visible
+-- (nothing advances the cursor prep→prep out of combat). The planner keeps them
+-- separate purely for authoring tidiness.
+local function mergedPrepAssignments(pulls, startIdx)
+    local out = {}
+    for i = startIdx, #pulls do
+        local p = pulls[i]
+        if not (CRP.Plan and CRP.Plan:IsPrepPull(p)) then break end
+        if p.assignments then
+            for _, a in ipairs(p.assignments) do out[#out + 1] = a end
+        end
+    end
+    return out
+end
+
 -- Equip assignments only make sense between pulls — you can't swap gear in
--- combat. Everything else only makes sense *during* combat. One frame, two
--- modes; combat-state toggles which assignment kinds we surface.
+-- combat. Everything else only makes sense *during* combat. One frame, three
+-- modes: on a prep step we show its merged checklist; otherwise combat-state
+-- toggles between equip (out of combat) and cooldowns/items/kicks (in combat).
 local function entriesForPull()
     if not (CRP.Plan and CRP.ui and CRP.ui.IsMyAssignment) then return {} end
-    local pull = CRP.Plan:CurrentPull()
-    if not pull or not pull.assignments then return {} end
+    local pull, idx = CRP.Plan:CurrentPull()
+    if not pull then return {} end
+
+    -- Prep step: render the merged consecutive-prep checklist. These are
+    -- pre-pull actions (buffs/summons/swaps); combat-start advances the cursor
+    -- off the run (Plan:AdvancePastPrep), so in practice this renders out of
+    -- combat. We surface the same ownable, icon-able kinds either way.
+    local prepMode = CRP.Plan:IsPrepPull(pull)
+    local source = prepMode and mergedPrepAssignments(CRP.Plan:Pulls(), idx) or pull.assignments
+    if not source then return {} end
+
     local inCombat = combatActive
     local out = {}
-    for _, a in ipairs(pull.assignments) do
+    for _, a in ipairs(source) do
         local k = a.kind
         local relevant
-        if inCombat then
+        if prepMode then
+            relevant = (k == "spell" or k == "item" or k == "equip")
+        elseif inCombat then
             relevant = (k == "spell" or k == "kick" or k == "item")
         else
             relevant = (k == "equip")
@@ -424,6 +454,13 @@ function HUD:Init()
         local ok, err
         if ev == "PLAYER_REGEN_DISABLED" then
             combatActive = true
+            -- A prep step can't auto-advance on a kill (no mobs), so combat
+            -- start is its exit trigger: jump past the prep run to the real
+            -- pull. SetCurrentPullIdx already refreshes the HUD, so the Refresh
+            -- below is just the no-prep-step path.
+            if CRP.Plan and CRP.Plan.AdvancePastPrep then
+                pcall(CRP.Plan.AdvancePastPrep, CRP.Plan)
+            end
             ok, err = pcall(HUD.Refresh, HUD)
             if not ok then print("|cffff3333CRP HUD error:|r " .. tostring(err)) end
             return
