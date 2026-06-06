@@ -14,6 +14,7 @@ Core.lua
 Share.lua
 Plan.lua
 Tracker.lua
+Triggers.lua
 Comms.lua
 UI.lua
 CombatHUD.lua
