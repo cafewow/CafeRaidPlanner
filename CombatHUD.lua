@@ -75,6 +75,103 @@ end
 -- would tell us we're still out of combat.
 local combatActive = false
 
+-- Reveal-trigger state (assignment-level triggers, distinct from pull-cursor
+-- progression). encounterStart is the clock for `time` triggers: anchored to
+-- ENCOUNTER_START when it fires (precise), else to combat start (trash pulls
+-- fire no encounter event). Reset when we leave combat / the encounter ends.
+-- `latched` remembers which assignments have already fired so a condition that
+-- flickers (boss healing back above a %) keeps the assignment revealed for the
+-- rest of the fight — keyed by the assignment table itself (stable across the
+-- 1Hz refresh). Wiped on the same resets and on pull change.
+local encounterStart = nil
+local latched = {}
+-- When the HUD test mode is on we reveal every triggered assignment so the
+-- layout can be previewed out of combat (conditions can't fire there).
+local testMode = false
+
+local function resetReveals()
+    encounterStart = nil
+    wipe(latched)
+end
+
+-- npcId out of a unit GUID, or nil for non-creature units. Mirrors Tracker's
+-- guid parsing; kept local so the HUD doesn't depend on Tracker internals.
+local function npcIdFromGuid(guid)
+    if not guid then return nil end
+    local kind, _, _, _, _, npcId = strsplit("-", guid)
+    if kind ~= "Creature" and kind ~= "Vehicle" then return nil end
+    return tonumber(npcId)
+end
+
+-- The npcIds a bossPct trigger should watch for the given pull. Prefer boss
+-- packs (those with a slug) so the trigger tracks the boss, not a low-health
+-- add sharing the pull; fall back to every mob in the pull if there's no boss.
+local function watchNpcIds(pull)
+    local set, bossFound = {}, false
+    if not (pull and pull.packIds and CRP.Plan) then return set end
+    for _, packId in ipairs(pull.packIds) do
+        local pack = CRP.Plan:PackById(packId)
+        if pack and pack.slug and pack.members then
+            for _, m in ipairs(pack.members) do set[m.npcId] = true end
+            bossFound = true
+        end
+    end
+    if not bossFound then
+        for _, packId in ipairs(pull.packIds) do
+            local pack = CRP.Plan:PackById(packId)
+            if pack and pack.members then
+                for _, m in ipairs(pack.members) do set[m.npcId] = true end
+            end
+        end
+    end
+    return set
+end
+
+-- Best-effort boss health %, sourced from any unit we can see whose npcId is in
+-- `set`: our target/focus plus visible nameplates. BCC has no boss1-5 frames
+-- (those are WotLK+), so this is the only path — it works when someone near has
+-- the boss targeted or nameplated (usually true for a stacked raid) and returns
+-- nil otherwise. Lowest match wins so we don't read a fresh add over the boss.
+local function bossHealthPct(set)
+    if not next(set) then return nil end
+    local best
+    local function consider(unit)
+        if not UnitExists(unit) then return end
+        local npcId = npcIdFromGuid(UnitGUID(unit))
+        if not npcId or not set[npcId] then return end
+        local maxHp = UnitHealthMax(unit)
+        if not maxHp or maxHp <= 0 then return end
+        local pct = UnitHealth(unit) / maxHp * 100
+        if not best or pct < best then best = pct end
+    end
+    consider("target")
+    consider("focus")
+    if C_NamePlate and C_NamePlate.GetNamePlates then
+        for _, plate in ipairs(C_NamePlate.GetNamePlates()) do
+            if plate.namePlateUnitToken then consider(plate.namePlateUnitToken) end
+        end
+    end
+    return best
+end
+
+-- Is an assignment's reveal trigger satisfied right now? No trigger = always.
+-- Latches on first fire so it stays revealed for the rest of the fight.
+local function revealSatisfied(a, pull)
+    local r = a.reveal
+    if not r then return true end
+    if testMode then return true end
+    if latched[a] then return true end
+    local fired = false
+    if r.type == "time" then
+        fired = encounterStart ~= nil and (GetTime() - encounterStart) >= (r.afterSec or 0)
+    elseif r.type == "bossPct" then
+        local pct = bossHealthPct(watchNpcIds(pull))
+        fired = pct ~= nil and pct <= (r.below or 0)
+    end
+    if fired then latched[a] = true end
+    return fired
+end
+
 local frame
 local iconPool = {}
 -- Most recently rendered assignment list — used by lightweight refreshes
@@ -221,7 +318,10 @@ local function entriesForPull()
         end
         -- Reminders have no actionable gate (no item/spell to check) — skip
         -- them in the HUD. The main window still surfaces them in Pull Notes.
-        if relevant and type(a.id) == "number" and CRP.ui.IsMyAssignment(a) then
+        -- revealSatisfied gates assignment-level triggers (time / boss %): a
+        -- triggered assignment stays hidden until its condition fires.
+        if relevant and type(a.id) == "number" and CRP.ui.IsMyAssignment(a)
+           and revealSatisfied(a, pull) then
             -- Item/equip assignments only appear if the player actually has
             -- the item in their bags. A grenade you don't carry or a swap
             -- piece you sold off is noise, not a prompt — drop it entirely.
@@ -438,6 +538,7 @@ end
 -- flips our tracked combat flag; doesn't touch the global InCombatLockdown.
 function HUD:SetTestMode(on)
     combatActive = on and true or false
+    testMode = on and true or false
     self:Refresh()
 end
 
@@ -455,10 +556,18 @@ function HUD:Init()
     eventFrame:RegisterEvent("BAG_UPDATE_COOLDOWN")
     eventFrame:RegisterEvent("BAG_UPDATE")
     eventFrame:RegisterEvent("GET_ITEM_INFO_RECEIVED")
+    -- Encounter clock for `time` reveal triggers. ENCOUNTER_START/END fire for
+    -- raid bosses in BCC (with a known reset-desync edge case if a boss is kited
+    -- out of its area), so combat start/end stays the fallback below.
+    eventFrame:RegisterEvent("ENCOUNTER_START")
+    eventFrame:RegisterEvent("ENCOUNTER_END")
     eventFrame:SetScript("OnEvent", function(_, ev)
         local ok, err
         if ev == "PLAYER_REGEN_DISABLED" then
             combatActive = true
+            -- Anchor the reveal clock to combat start; ENCOUNTER_START re-anchors
+            -- to the precise encounter time if/when it fires just after.
+            if not encounterStart then encounterStart = GetTime() end
             -- A prep step can't auto-advance on a kill (no mobs), so combat
             -- start is its exit trigger: jump past the prep run to the real
             -- pull. SetCurrentPullIdx already refreshes the HUD, so the Refresh
@@ -471,6 +580,18 @@ function HUD:Init()
             return
         elseif ev == "PLAYER_REGEN_ENABLED" then
             combatActive = false
+            resetReveals()
+            ok, err = pcall(HUD.Refresh, HUD)
+            if not ok then print("|cffff3333CRP HUD error:|r " .. tostring(err)) end
+            return
+        elseif ev == "ENCOUNTER_START" then
+            encounterStart = GetTime()
+            wipe(latched)
+            ok, err = pcall(HUD.Refresh, HUD)
+            if not ok then print("|cffff3333CRP HUD error:|r " .. tostring(err)) end
+            return
+        elseif ev == "ENCOUNTER_END" then
+            resetReveals()
             ok, err = pcall(HUD.Refresh, HUD)
             if not ok then print("|cffff3333CRP HUD error:|r " .. tostring(err)) end
             return
@@ -504,6 +625,10 @@ end
 -- Called by Plan:SetCurrentPullIdx so the HUD swaps to the new pull's icons
 -- mid-combat (e.g. auto-advance after a kill).
 function HUD:OnPullChanged()
+    -- New pull → its reveal triggers start fresh. We deliberately keep
+    -- encounterStart running: a continuous fight that advances pulls (trash
+    -- chains) shouldn't reset the `time` clock; only leaving combat does.
+    wipe(latched)
     -- Always refresh: out-of-combat pull advances change the set of equip
     -- icons we should be displaying.
     self:Refresh()
