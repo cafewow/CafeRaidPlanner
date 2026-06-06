@@ -95,11 +95,8 @@ local function isMyView()
 	return currentMode() == "my"
 end
 
--- Strip realm suffix from a name like "Gustaf-Gehennas".
-local function stripRealm(name)
-	if not name or name == "" then return name end
-	return (name:match("^([^-]+)")) or name
-end
+-- Realm-suffix stripping lives in CRP.util now (shared with Comms).
+local stripRealm = CRP.util.stripRealm
 
 -- True iff the assignment has enough data to be worth rendering. Blank rows
 -- (freshly added but unfilled) are skipped in the current-pull list and the
@@ -673,11 +670,8 @@ end
 
 local function pullDisplayName(pull)
 	local bossNames = {}
-	for _, packId in ipairs(pull.packIds or {}) do
-		local pack = CRP.Plan:PackById(packId)
-		if pack and pack.slug then
-			bossNames[#bossNames + 1] = pack.name or pack.slug
-		end
+	for _, pack in ipairs(CRP.Plan:BossPacks(pull)) do
+		bossNames[#bossNames + 1] = pack.name or pack.slug
 	end
 	if #bossNames > 0 then return table.concat(bossNames, " + ") end
 	return pull.name or "Pull"

@@ -156,9 +156,57 @@ function Plan:AdvancePastPrep()
     self:SetCurrentPullIdx(target)
 end
 
+-- Kill-driven advance. The caller (Tracker, after recording a kill that
+-- completed the current pull) has already decided we *should* advance; this owns
+-- *where* the cursor goes. Probe forward without side effects to the first pull
+-- that still needs work — skipping any already-complete pulls, e.g. ones
+-- pre-filled by overflow kills — then move there with a single SetCurrentPullIdx
+-- so a multi-pull skip emits at most one CRPPULL broadcast + one Refresh. Plan
+-- owns cursor movement; Tracker only answers "is this pull complete?".
+function Plan:AdvanceToNextIncomplete()
+    local pulls = self:Pulls()
+    local n = #pulls
+    local idx = self:CurrentPullIdx()
+    local target = idx
+    while target < n do
+        local probe = target + 1
+        if CRP.Tracker:IsPullCompleteFor(pulls[probe]) then
+            target = probe
+        else
+            target = probe
+            break
+        end
+    end
+    if target > idx then
+        self:SetCurrentPullIdx(target)
+        if target == n and CRP.Tracker:IsPullComplete() then
+            print("|cff38c24fCafeRaidPlanner:|r final pull complete.")
+        else
+            print("|cff38c24fCafeRaidPlanner:|r pull complete — advancing to pull " .. target)
+        end
+    elseif target == n then
+        print("|cff38c24fCafeRaidPlanner:|r final pull complete.")
+    end
+end
+
 -- Look up a pack by id in the current plan.
 function Plan:PackById(packId)
     return ensurePackIndex()[packId]
+end
+
+-- Boss packs referenced by a pull. The web app marks boss packs with a slug
+-- (they're otherwise ordinary packs). Several callers need "which of this pull's
+-- packs are bosses" — the UI for the pull's display name, Triggers for the
+-- bossPct watch set — so the slug detection lives here, next to the pack data,
+-- rather than being re-iterated in each consumer.
+function Plan:BossPacks(pull)
+    local out = {}
+    if not (pull and pull.packIds) then return out end
+    for _, packId in ipairs(pull.packIds) do
+        local pack = self:PackById(packId)
+        if pack and pack.slug then out[#out + 1] = pack end
+    end
+    return out
 end
 
 -- Runtime cache of npcId → name enriched from combat log destName. Useful when

@@ -27,35 +27,26 @@ local testMode = false
 
 -- ===== boss-health sourcing (for bossPct) ====================================
 
--- npcId out of a unit GUID, or nil for non-creature units. (Tracker has its own
--- copy keyed to kill tracking; both are thin parses of the same GUID format —
--- a shared CRP.util is the eventual home, tracked as a separate cleanup.)
-local function npcIdFromGuid(guid)
-    if not guid then return nil end
-    local kind, _, _, _, _, npcId = strsplit("-", guid)
-    if kind ~= "Creature" and kind ~= "Vehicle" then return nil end
-    return tonumber(npcId)
-end
+-- Shared GUID parsing (also used by Tracker). Util.lua loads first.
+local npcIdFromGUID = CRP.util.npcIdFromGUID
 
--- The npcIds a bossPct trigger should watch for `pull`. Prefer boss packs (those
--- with a slug) so the trigger tracks the boss, not a low-health add sharing the
--- pull; fall back to every mob in the pull if there's no boss.
+-- The npcIds a bossPct trigger should watch for `pull`. Prefer boss packs (Plan
+-- owns that detection) so the trigger tracks the boss, not a low-health add
+-- sharing the pull; fall back to every mob in the pull if there's no boss.
 local function watchNpcIds(pull)
-    local set, bossFound = {}, false
-    if not (pull and pull.packIds and CRP.Plan) then return set end
-    for _, packId in ipairs(pull.packIds) do
-        local pack = CRP.Plan:PackById(packId)
-        if pack and pack.slug and pack.members then
-            for _, m in ipairs(pack.members) do set[m.npcId] = true end
-            bossFound = true
+    local set = {}
+    if not (pull and CRP.Plan) then return set end
+    local bossPacks = CRP.Plan:BossPacks(pull)
+    if #bossPacks > 0 then
+        for _, pack in ipairs(bossPacks) do
+            for _, m in ipairs(pack.members or {}) do set[m.npcId] = true end
         end
+        return set
     end
-    if not bossFound then
-        for _, packId in ipairs(pull.packIds) do
-            local pack = CRP.Plan:PackById(packId)
-            if pack and pack.members then
-                for _, m in ipairs(pack.members) do set[m.npcId] = true end
-            end
+    for _, packId in ipairs(pull.packIds or {}) do
+        local pack = CRP.Plan:PackById(packId)
+        if pack and pack.members then
+            for _, m in ipairs(pack.members) do set[m.npcId] = true end
         end
     end
     return set
@@ -71,7 +62,7 @@ local function bossHealthPct(set)
     local best
     local function consider(unit)
         if not UnitExists(unit) then return end
-        local npcId = npcIdFromGuid(UnitGUID(unit))
+        local npcId = npcIdFromGUID(UnitGUID(unit))
         if not npcId or not set[npcId] then return end
         local maxHp = UnitHealthMax(unit)
         if not maxHp or maxHp <= 0 then return end

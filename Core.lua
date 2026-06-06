@@ -28,6 +28,30 @@ local defaults = {
             raidSize = nil,         -- { w, h } — resizes persist per mode
             mySize   = nil,
         },
+        -- Combat HUD placement/appearance — per character (people on multiple
+        -- toons want different placements). Read via CombatHUD's cfg() accessor;
+        -- AceDB fills these defaults, so the HUD no longer self-seeds.
+        combatHUD = {
+            point = "CENTER",
+            relPoint = "CENTER",
+            x = 0,
+            y = -180,
+            iconSize = 40,
+            spacing = 4,
+            scale = 1.0,
+            locked = true,
+            enabled = true,
+            direction = "horizontal",   -- "horizontal" | "vertical"
+            -- Restrict the HUD to raid/dungeon instances. Default on — outside an
+            -- instance, the planner is just a tool, not an active overlay. Toggle
+            -- off for testing on a target dummy in town.
+            instanceOnly = true,
+            -- If an assignment's cooldown has more than this many seconds
+            -- remaining, hide it from the HUD entirely rather than dimming it.
+            -- Stops a sapper used on pull 1 from staying on screen across pulls
+            -- 2/3/4. 0 = never hide (always dim with swipe — original behavior).
+            hideThresholdSec = 5,
+        },
     },
 }
 

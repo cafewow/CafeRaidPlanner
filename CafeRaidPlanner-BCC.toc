@@ -10,6 +10,7 @@
 
 libs\load_libs.xml
 init.lua
+Util.lua
 Core.lua
 Share.lua
 Plan.lua

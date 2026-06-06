@@ -48,10 +48,7 @@ end
 -- Helpers
 -- ---------------------------------------------------------------------------
 
-local function stripRealm(name)
-    if not name or name == "" then return name end
-    return name:match("^([^-]+)") or name
-end
+local stripRealm = CRP.util.stripRealm
 
 local function channel()
     if IsInRaid() then return "RAID" end

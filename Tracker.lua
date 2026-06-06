@@ -48,27 +48,11 @@ local function killsFor(pullId)
     return state.killsByPullUid[pullId]
 end
 
-local function npcIdFromGUID(guid)
-    if not guid then return nil end
-    local kind, _, _, _, _, npcId = strsplit("-", guid)
-    if kind ~= "Creature" and kind ~= "Vehicle" then return nil end
-    return tonumber(npcId)
-end
-
--- Lockout fingerprint. Field names from the WoW GUID format are misleading:
--- the field often called "instanceID" (4) is actually the map id — it stays the
--- same across dungeon resets. The per-instance unique value is in "zoneUID"
--- (5), which increments every time a fresh instance is spawned (after a reset
--- or a new lockout). Verified empirically on Classic Anniversary: RFC mobs
--- before reset had zoneUID=323977, after reset zoneUID=324052, while field 4
--- (mapID 389 = Ragefire Chasm) stayed constant.
-local function instanceKeyFromGUID(guid)
-    if not guid then return nil end
-    local kind, _, serverID, _, zoneUID = strsplit("-", guid)
-    if kind ~= "Creature" and kind ~= "Vehicle" then return nil end
-    if not serverID or not zoneUID then return nil end
-    return serverID .. "-" .. zoneUID
-end
+-- GUID parsing lives in CRP.util now (shared with Triggers). Local aliases keep
+-- the call sites below unchanged. Util.lua loads before Tracker.lua, so these
+-- are populated at chunk load.
+local npcIdFromGUID = CRP.util.npcIdFromGUID
+local instanceKeyFromGUID = CRP.util.instanceKeyFromGUID
 
 function Tracker:Slots()
     local pull = CRP.Plan:CurrentPull()
@@ -271,35 +255,10 @@ local function onMobDied(destGUID)
         CRP.ui.Window:Refresh()
     end
 
+    -- Tracker decides *whether* to advance (current pull complete + the setting);
+    -- Plan owns *where* the cursor goes (the forward probe + the move).
     if Tracker:IsPullComplete() and CRP.db.global.autoAdvance ~= false then
-        local pulls = CRP.Plan:Pulls()
-        local n = #pulls
-        local idx = CRP.Plan:CurrentPullIdx()
-        -- Probe forward without side effects to find the first incomplete pull
-        -- (or the final pull if all remaining are complete). Overflow kills can
-        -- have pre-filled multiple later pulls; we want to land on the first
-        -- one that still needs work. Single SetCurrentPullIdx at the end so we
-        -- emit at most one CRPPULL broadcast and one Refresh, even on multi-pull skips.
-        local target = idx
-        while target < n do
-            local probe = target + 1
-            if Tracker:IsPullCompleteFor(pulls[probe]) then
-                target = probe
-            else
-                target = probe
-                break
-            end
-        end
-        if target > idx then
-            CRP.Plan:SetCurrentPullIdx(target)
-            if target == n and Tracker:IsPullComplete() then
-                print("|cff38c24fCafeRaidPlanner:|r final pull complete.")
-            else
-                print("|cff38c24fCafeRaidPlanner:|r pull complete — advancing to pull " .. target)
-            end
-        elseif target == n then
-            print("|cff38c24fCafeRaidPlanner:|r final pull complete.")
-        end
+        CRP.Plan:AdvanceToNextIncomplete()
     end
 end
 

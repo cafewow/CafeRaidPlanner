@@ -7,37 +7,12 @@ local _, CRP = ...
 local HUD = {}
 CRP.HUD = HUD
 
-local DEFAULTS = {
-    point = "CENTER",
-    relPoint = "CENTER",
-    x = 0,
-    y = -180,
-    iconSize = 40,
-    spacing = 4,
-    scale = 1.0,
-    locked = true,
-    enabled = true,
-    direction = "horizontal",   -- "horizontal" | "vertical"
-    -- Restrict the HUD to raid/dungeon instances. Default on — outside an
-    -- instance, the planner is just a tool, not an active overlay. Toggle off
-    -- for testing on a target dummy in town.
-    instanceOnly = true,
-    -- If an assignment's cooldown has more than this many seconds remaining,
-    -- hide it from the HUD entirely rather than dimming it. Stops things like
-    -- a sapper used on pull 1 from staying on screen across pulls 2/3/4.
-    -- 0 = never hide (always dim with swipe — original behavior).
-    hideThresholdSec = 5,
-}
-
+-- Accessor for the per-character HUD config. The schema + defaults live in
+-- Core.defaults (char.combatHUD); AceDB merges the defaults, so this is just the
+-- lookup. The `{}` fallback only covers the pre-init path (cfg() is first called
+-- from HUD:Init, after Core:OnInitialize sets CRP.db, so it shouldn't be hit).
 local function cfg()
-    -- Per-character: people on multiple toons want different placements.
-    local db = CRP.db and CRP.db.char
-    if not db then return DEFAULTS end
-    db.combatHUD = db.combatHUD or {}
-    for k, v in pairs(DEFAULTS) do
-        if db.combatHUD[k] == nil then db.combatHUD[k] = v end
-    end
-    return db.combatHUD
+    return (CRP.db and CRP.db.char and CRP.db.char.combatHUD) or {}
 end
 
 -- GetItemCooldown moved out of the global namespace in newer clients (Cata
@@ -231,9 +206,11 @@ local function entriesForPull()
         -- Reminders have no actionable gate (no item/spell to check) — skip
         -- them in the HUD. The main window still surfaces them in Pull Notes.
         -- CRP.Triggers gates assignment-level triggers (time / boss %): a
-        -- triggered assignment stays hidden until its condition fires.
+        -- triggered assignment stays hidden until its condition fires. Reveals
+        -- are combat-relative, so they don't apply in prep mode (out of combat,
+        -- no clock/boss) — show prep assignments regardless of any stale reveal.
         if relevant and type(a.id) == "number" and CRP.ui.IsMyAssignment(a)
-           and CRP.Triggers:IsRevealed(a, pull) then
+           and (prepMode or CRP.Triggers:IsRevealed(a, pull)) then
             -- Item/equip assignments only appear if the player actually has
             -- the item in their bags. A grenade you don't carry or a swap
             -- piece you sold off is noise, not a prompt — drop it entirely.
@@ -406,9 +383,10 @@ function HUD:SetLocked(locked)
 end
 
 function HUD:ResetPosition()
+    -- Clear the saved position overrides; AceDB then serves the Core.defaults
+    -- position (CENTER / 0,-180) on the next read in applyDb.
     local c = cfg()
-    c.point, c.relPoint = DEFAULTS.point, DEFAULTS.relPoint
-    c.x, c.y = DEFAULTS.x, DEFAULTS.y
+    c.point, c.relPoint, c.x, c.y = nil, nil, nil, nil
     applyDb()
 end
 
