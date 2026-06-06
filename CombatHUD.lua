@@ -84,6 +84,16 @@ local function createIcon(parent)
     f.cd:SetAllPoints()
     f.count = f:CreateFontString(nil, "OVERLAY", "NumberFontNormalSmall")
     f.count:SetPoint("BOTTOMRIGHT", -1, 1)
+    -- "EQUIP" banner — shown only on equip assignments (gear swaps between
+    -- pulls), so the prompt reads as "put this on" rather than "use this".
+    -- Outlined default font is legible over the icon art without a backdrop.
+    f.label = f:CreateFontString(nil, "OVERLAY")
+    f.label:SetFont("Fonts\\FRIZQT__.TTF", 9, "OUTLINE")  -- black glyph border
+    f.label:SetPoint("BOTTOM", f, "BOTTOM", 0, 1)
+    f.label:SetTextColor(1, 1, 1)              -- white
+    f.label:SetShadowColor(0, 0, 0, 1)         -- + black drop shadow
+    f.label:SetShadowOffset(1, -1)
+    f.label:Hide()
     return f
 end
 
@@ -215,8 +225,14 @@ local function entriesForPull()
             -- the item in their bags. A grenade you don't carry or a swap
             -- piece you sold off is noise, not a prompt — drop it entirely.
             local hasItem = true
-            if a.kind == "item" or a.kind == "equip" then
-                hasItem = (GetItemCount(a.id) or 0) > 0
+            if a.kind == "item" then
+                -- A "use" is available from bags OR an equipped slot (on-use
+                -- trinkets/weapons), since GetItemCount counts bags only.
+                hasItem = (GetItemCount(a.id) or 0) > 0 or IsEquippedItem(a.id)
+            elseif a.kind == "equip" then
+                -- An equip prompt is "put this on": needs to be in bags and not
+                -- already worn (drop it once equipped, even with a spare in bags).
+                hasItem = (GetItemCount(a.id) or 0) > 0 and not IsEquippedItem(a.id)
             end
             -- Hide entries whose cooldown still has more than `hideThresholdSec`
             -- left — a sapper used on pull 1 shouldn't linger on pull 2/3/4.
@@ -240,7 +256,11 @@ local function paintIcon(icon, a)
         local _, _, _, _, _, _, _, _, _, tex = GetItemInfo(a.id)
         texture = tex
         count = GetItemCount(a.id) or 0
-        if count <= 0 then
+        -- On-use items work from bags OR an equipped slot (trinkets/weapons like
+        -- Nifty Stopwatch). GetItemCount counts bags only, so an equipped on-use
+        -- item reads count 0 — check the equipped slot too, otherwise it stays
+        -- dimmed forever even after its cooldown ends.
+        if count <= 0 and not IsEquippedItem(a.id) then
             ready = false
         else
             local s, d = itemCooldown(a.id)
@@ -284,6 +304,19 @@ local function paintIcon(icon, a)
         icon.count:Show()
     else
         icon.count:Hide()
+    end
+    -- Banner items so the prompt reads unambiguously: "EQUIP" (swap it on) vs
+    -- "USE" (activate it). Most relevant for on-use gear, which can appear as
+    -- both an equip assignment and a use assignment of the same item. Spells and
+    -- kicks are abilities, not items, so they go unbannered.
+    if a.kind == "equip" then
+        icon.label:SetText("EQUIP")
+        icon.label:Show()
+    elseif a.kind == "item" then
+        icon.label:SetText("USE")
+        icon.label:Show()
+    else
+        icon.label:Hide()
     end
 end
 
@@ -446,6 +479,12 @@ function HUD:Init()
     eventFrame:RegisterEvent("BAG_UPDATE_COOLDOWN")
     eventFrame:RegisterEvent("BAG_UPDATE")
     eventFrame:RegisterEvent("GET_ITEM_INFO_RECEIVED")
+    -- Equipping an item should drop its "EQUIP" prompt immediately. Out of
+    -- combat the ticker doesn't refresh while the HUD is locked, so we need the
+    -- equipment event (BAG_UPDATE covers the bags-only case, but this also
+    -- catches swaps that net no bag-count change). Handled by the default
+    -- full-refresh branch below.
+    eventFrame:RegisterEvent("PLAYER_EQUIPMENT_CHANGED")
     -- Encounter clock for `time` reveal triggers. ENCOUNTER_START/END fire for
     -- raid bosses in BCC (with a known reset-desync edge case if a boss is kited
     -- out of its area), so combat start/end stays the fallback below.

@@ -177,14 +177,19 @@ function Plan:AdvanceToNextIncomplete()
             break
         end
     end
+    -- Progression chatter is debug-only — the cursor moving in the HUD/window is
+    -- the real feedback. Advancement itself (SetCurrentPullIdx) is unconditional.
+    local debug = CRP.db and CRP.db.global and CRP.db.global.debug
     if target > idx then
         self:SetCurrentPullIdx(target)
-        if target == n and CRP.Tracker:IsPullComplete() then
-            print("|cff38c24fCafeRaidPlanner:|r final pull complete.")
-        else
-            print("|cff38c24fCafeRaidPlanner:|r pull complete — advancing to pull " .. target)
+        if debug then
+            if target == n and CRP.Tracker:IsPullComplete() then
+                print("|cff38c24fCafeRaidPlanner:|r final pull complete.")
+            else
+                print("|cff38c24fCafeRaidPlanner:|r pull complete — advancing to pull " .. target)
+            end
         end
-    elseif target == n then
+    elseif target == n and debug then
         print("|cff38c24fCafeRaidPlanner:|r final pull complete.")
     end
 end

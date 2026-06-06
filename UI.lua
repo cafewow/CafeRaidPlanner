@@ -47,7 +47,7 @@ local progressPool = {}
 local assignPool = {}
 local upcomingPool = {}
 local tableHeader
-local noteParagraph
+local noteParagraphPool = {}
 
 -- Chrome fade: title bar, nav, grip, backdrop, scroll bar, plus the Kill
 -- Progress / Upcoming sections all fade out when the mouse leaves the window,
@@ -268,13 +268,15 @@ local function getBullet(i)
 	return b
 end
 
-local function getNoteParagraph()
-	if noteParagraph then return noteParagraph end
-	noteParagraph = content:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
-	noteParagraph:SetJustifyH("LEFT")
-	noteParagraph:SetJustifyV("TOP")
-	noteParagraph:SetWordWrap(true)
-	return noteParagraph
+local function getNoteParagraph(i)
+	local np = noteParagraphPool[i]
+	if np then return np end
+	np = content:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+	np:SetJustifyH("LEFT")
+	np:SetJustifyV("TOP")
+	np:SetWordWrap(true)
+	noteParagraphPool[i] = np
+	return np
 end
 
 local function getProgressRow(i)
@@ -656,7 +658,7 @@ local function pullMobSummary(pull)
 			end
 		end
 	end
-	if #order == 0 then return pull.name or "" end
+	if #order == 0 then return "" end
 	table.sort(order, function(a, b)
 		if counts[a] ~= counts[b] then return counts[a] > counts[b] end
 		return a < b
@@ -668,13 +670,37 @@ local function pullMobSummary(pull)
 	return table.concat(parts, ", ")
 end
 
+-- Short label for one assignment, for compact summaries. Reuses the row
+-- resolver (so equips read "Equip: X", items/spells read their name) and adds
+-- reminder text, which the resolver intentionally skips.
+local function assignmentShortLabel(a)
+	if a.kind == "reminder" then
+		return (a.text and a.text ~= "") and a.text or nil
+	end
+	local _, ability = resolveAssignmentRow(a)
+	return (ability and ability ~= "") and ability or nil
+end
+
+-- Assignment summary for a pull, analogous to pullMobSummary but for the
+-- actions in the step — used so a prep pull (no mobs) isn't blank in Upcoming.
+local function pullAssignmentSummary(pull)
+	if not (pull and pull.assignments) then return "" end
+	local parts = {}
+	for _, a in ipairs(pull.assignments) do
+		local label = assignmentShortLabel(a)
+		if label then parts[#parts + 1] = label end
+	end
+	return table.concat(parts, ", ")
+end
+
+-- Boss name(s) for a pull, or "" for a plain trash pull. Pulls aren't named —
+-- callers prefix the position number, so trash pulls read as just "N.".
 local function pullDisplayName(pull)
 	local bossNames = {}
 	for _, pack in ipairs(CRP.Plan:BossPacks(pull)) do
 		bossNames[#bossNames + 1] = pack.name or pack.slug
 	end
-	if #bossNames > 0 then return table.concat(bossNames, " + ") end
-	return pull.name or "Pull"
+	return table.concat(bossNames, " + ")
 end
 
 -- Kill progress rows. Same shape as before: { kind="fixed" | "pool", ... }.
@@ -783,7 +809,8 @@ local function layoutPullNotes(ctx)
 
 	placeSection(ctx, "Pull Notes")
 	if noteText ~= "" then
-		local np = getNoteParagraph()
+		ctx.nIdx = ctx.nIdx + 1
+		local np = getNoteParagraph(ctx.nIdx)
 		np:ClearAllPoints()
 		np:SetPoint("TOPLEFT", content, "TOPLEFT", 10, -ctx.y)
 		np:SetWidth(W - 14)
@@ -975,13 +1002,66 @@ local function layoutUpcoming(ctx)
 		row:SetPoint("TOPLEFT", content, "TOPLEFT", 2, -ctx.y)
 		row:SetPoint("TOPRIGHT", content, "TOPRIGHT", -2, -ctx.y)
 		row.num:SetText(tostring(p.i))
+		-- Mobs if the pull has any; otherwise summarize its actions so prep steps
+		-- (no mobs) aren't blank in the preview.
 		local summary = pullMobSummary(p.pull)
+		if summary == "" then summary = pullAssignmentSummary(p.pull) end
 		row.name:SetText(summary)
 		row._tip = isTruncated(row.name) and summary or nil
 		row:EnableMouse(true)
 		row:SetScript("OnClick", function() CRP.Plan:SetCurrentPullIdx(p.i) end)
 		row:Show()
 		ctx.y = ctx.y + UPCOMING_ROW_H
+	end
+	ctx.y = ctx.y + SECTION_GAP
+end
+
+-- While parked on a prep step, preview the upcoming real pull's notes so the
+-- raid leader can read them and start the callout during prep/running. The
+-- Upcoming section already lists what's in each pull; this surfaces the next
+-- pull's note + reminders (the bits Upcoming doesn't), under a "Next:" header.
+-- Skipped when there's no callout material — Upcoming covers the rest.
+local function layoutNextPull(ctx)
+	if not (CRP.Plan and CRP.Plan:IsPrepPull(ctx.pull)) then return end
+	-- First real pull after this (possibly multi-step) prep run.
+	local j = ctx.idx + 1
+	while ctx.pulls[j] and CRP.Plan:IsPrepPull(ctx.pulls[j]) do j = j + 1 end
+	local nextPull = ctx.pulls[j]
+	if not nextPull then return end
+
+	local noteText = nextPull.note or ""
+	local reminders = {}
+	for _, a in ipairs(nextPull.assignments or {}) do
+		if a.kind == "reminder" and hasContent(a) and (not ctx.my or CRP.ui.IsMyAssignment(a)) then
+			reminders[#reminders + 1] = a
+		end
+	end
+	if noteText == "" and #reminders == 0 then return end
+
+	local name = pullDisplayName(nextPull)
+	local title = name ~= "" and name or ("Pull " .. j)
+	placeSection(ctx, "Next: " .. title)
+	local W = ctx.W
+
+	if noteText ~= "" then
+		ctx.nIdx = ctx.nIdx + 1
+		local np = getNoteParagraph(ctx.nIdx)
+		np:ClearAllPoints()
+		np:SetPoint("TOPLEFT", content, "TOPLEFT", 10, -ctx.y)
+		np:SetWidth(W - 14)
+		np:SetText(noteText)
+		np:Show()
+		ctx.y = ctx.y + math.max(14, np:GetStringHeight()) + 4
+	end
+	for _, r in ipairs(reminders) do
+		ctx.bIdx = ctx.bIdx + 1
+		local b = getBullet(ctx.bIdx)
+		b:ClearAllPoints()
+		b:SetPoint("TOPLEFT", content, "TOPLEFT", 10, -ctx.y)
+		b:SetWidth(W - 14)
+		b:SetText("- " .. (r.text or ""))
+		b:Show()
+		ctx.y = ctx.y + math.max(12, b:GetStringHeight()) + BULLET_GAP
 	end
 	ctx.y = ctx.y + SECTION_GAP
 end
@@ -998,7 +1078,7 @@ function Window:Refresh()
 	for _, p in ipairs(progressPool) do p:Hide() end
 	for _, r in ipairs(assignPool) do r:Hide() end
 	for _, u in ipairs(upcomingPool) do u:Hide() end
-	if noteParagraph then noteParagraph:Hide() end
+	for _, np in ipairs(noteParagraphPool) do np:Hide() end
 	if tableHeader then tableHeader:Hide() end
 
 	-- Rebuild chrome list: statics first, then dynamic sections register
@@ -1023,11 +1103,17 @@ function Window:Refresh()
 	pullCounter:SetText(string.format("Pull %d / %d", idx, #pulls))
 
 	-- Header text. In My view the nav strip is hidden so we inline the counter
-	-- into the title; in Raid view the counter lives in the nav strip.
+	-- into the title; in Raid view the counter lives in the nav strip. Trash
+	-- pulls have no name, so they read by position number alone.
+	local name = pullDisplayName(pull)
 	if my then
-		pullTitle:SetText(string.format("Pull %d/%d — %s", idx, #pulls, pullDisplayName(pull)))
+		if name ~= "" then
+			pullTitle:SetText(string.format("Pull %d/%d — %s", idx, #pulls, name))
+		else
+			pullTitle:SetText(string.format("Pull %d/%d", idx, #pulls))
+		end
 	else
-		pullTitle:SetText(pullDisplayName(pull))
+		pullTitle:SetText(name ~= "" and name or string.format("Pull %d", idx))
 	end
 	local pn = packNames(pull)
 	packLine:SetText(pn ~= "" and ("Packs: " .. pn) or "")
@@ -1040,7 +1126,7 @@ function Window:Refresh()
 
 	local ctx = {
 		y = 0,
-		sIdx = 0, bIdx = 0, pIdx = 0, aIdx = 0, uIdx = 0,
+		sIdx = 0, bIdx = 0, pIdx = 0, aIdx = 0, uIdx = 0, nIdx = 0,
 		W = W,
 		pull = pull,
 		my = my,
@@ -1050,6 +1136,7 @@ function Window:Refresh()
 	layoutPullNotes(ctx)
 	if not my then layoutKillProgress(ctx) end
 	layoutAssignments(ctx)
+	layoutNextPull(ctx)
 	if not my then layoutUpcoming(ctx) end
 
 	content:SetHeight(math.max(1, ctx.y))
@@ -1159,7 +1246,9 @@ function refreshPullPopupRows()
 			pullPopup:Hide()
 		end)
 		local prefix = (i == currentIdx) and "|cffffd54a>|r " or "   "
-		row.text:SetText(string.format("%s%d. %s", prefix, i, pullDisplayName(pull)))
+		local name = pullDisplayName(pull)
+		local label = name ~= "" and string.format("%d. %s", i, name) or ("Pull " .. i)
+		row.text:SetText(prefix .. label)
 		row:Show()
 	end
 	for i = #pulls + 1, #pullPopupRowPool do pullPopupRowPool[i]:Hide() end
