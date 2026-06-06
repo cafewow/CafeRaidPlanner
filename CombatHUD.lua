@@ -300,7 +300,12 @@ local function entriesForPull()
     -- pre-pull actions (buffs/summons/swaps); combat-start advances the cursor
     -- off the run (Plan:AdvancePastPrep), so in practice this renders out of
     -- combat. We surface the same ownable, icon-able kinds either way.
-    local prepMode = CRP.Plan:IsPrepPull(pull)
+    -- Prep mode renders only out of combat. Normally combat-start advances the
+    -- cursor off the prep run (AdvancePastPrep), but that's a no-op for a
+    -- trailing/misauthored prep step with no real pull after it — without the
+    -- `not combatActive` guard the HUD would surface equip swaps as in-combat
+    -- prompts, the exact thing the two-mode gate exists to prevent.
+    local prepMode = CRP.Plan:IsPrepPull(pull) and not combatActive
     local source = prepMode and mergedPrepAssignments(CRP.Plan:Pulls(), idx) or pull.assignments
     if not source then return {} end
 
@@ -591,7 +596,13 @@ function HUD:Init()
             if not ok then print("|cffff3333CRP HUD error:|r " .. tostring(err)) end
             return
         elseif ev == "ENCOUNTER_END" then
-            resetReveals()
+            -- Only clear latches here, NOT the clock. ENCOUNTER_END often fires
+            -- while we're still in combat (boss dead, adds/trash up). Nulling
+            -- encounterStart then would leave `time` triggers dead for the rest
+            -- of the combat stretch, since only PLAYER_REGEN_DISABLED re-anchors
+            -- it. Leaving combat (PLAYER_REGEN_ENABLED → resetReveals) owns the
+            -- clock reset.
+            wipe(latched)
             ok, err = pcall(HUD.Refresh, HUD)
             if not ok then print("|cffff3333CRP HUD error:|r " .. tostring(err)) end
             return

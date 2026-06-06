@@ -196,11 +196,17 @@ local function findPullForKill(npcId)
     if #pulls == 0 then return nil end
     local idx = CRP.Plan:CurrentPullIdx()
     local lookahead = CRP.db.global.killLookahead or 3
-    local last = math.min(#pulls, idx + lookahead)
     local state = ensureState()
-    for i = idx, last do
+    -- Walk forward from the cursor. Prep pulls have no slots and are never kill
+    -- candidates, so they must NOT consume the lookahead budget — that budget is
+    -- for patrols / out-of-order kills among real pulls. Counting prep steps
+    -- against it would push real pulls out of the window and silently drop their
+    -- kills. `examined` counts only real pulls; we consider the current pull plus
+    -- `lookahead` real pulls ahead (matching the old idx..idx+lookahead span).
+    local examined = 0
+    for i = idx, #pulls do
         local pull = pulls[i]
-        if pull then
+        if pull and not CRP.Plan:IsPrepPull(pull) then
             local slots = CRP.Plan:SlotsForPull(pull)
             -- Cheap filter: skip pulls that don't accept this npcId in any slot.
             local accepted = false
@@ -220,6 +226,8 @@ local function findPullForKill(npcId)
                     end
                 end
             end
+            examined = examined + 1
+            if examined > lookahead then break end
         end
     end
     return nil
