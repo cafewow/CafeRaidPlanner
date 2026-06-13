@@ -148,8 +148,12 @@ function Options:Show()
     window = AceGUI:Create("Frame")
     window:SetTitle("CafeRaidPlanner — Options")
     window:SetLayout("Fill")
-    window:SetWidth(420)
-    window:SetHeight(380)
+    -- Sized for the taller tab (Combat HUD: three toggles, a dropdown, four
+    -- sliders, a button and the help text). The General tab is shorter, but a
+    -- fixed default keeps the close button visible on both without forcing the
+    -- user to resize. AceGUI Frames are still user-resizable from here.
+    window:SetWidth(440)
+    window:SetHeight(560)
     window:SetCallback("OnClose", function(w)
         window = nil
         -- Re-lock the HUD on close so we don't leave a draggable frame behind.
