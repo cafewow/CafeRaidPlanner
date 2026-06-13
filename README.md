@@ -38,6 +38,12 @@ rogue doesn't see Innervate. Toggle with the **My view** / **Raid view**
 button in the top-right corner. The window remembers its size and position
 separately per mode.
 
+Assignments can also target a **role** (tank / healer / damage) instead of a
+named player. Role and class filters stack: a Divine Shield assigned to "tanks"
+only reaches paladin tanks. Your role is auto-detected from your talents; if it
+guesses wrong, override it with `/crp role tank|healer|damage` (or the dropdown
+in the options window), and `/crp role auto` to go back to detection.
+
 ## Combat HUD
 
 A small icon bar pops up when you enter combat showing just your actionable
@@ -90,6 +96,7 @@ and CCs, then export a share string. The addon imports that string.
 | `/crp autoshow on\|off`   | open window on raid zone-in / incoming plan (default on) |
 | `/crp autoimport on\|off` | skip the import prompt for pushed plans (default off)    |
 | `/crp reveal click\|hover`| reveal the window chrome on click vs. hover (default hover)|
+| `/crp role tank\|healer\|damage\|auto` | set your role for role-targeted assignments (default auto-detect) |
 | `/crp clearkills`         | reset tracked kills without dropping the plan            |
 | `/crp reset`              | drop the plan entirely                                   |
 | `/crp debug on\|off`      | log each UNIT_DIED GUID, for lockout troubleshooting     |

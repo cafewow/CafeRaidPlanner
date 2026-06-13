@@ -124,9 +124,15 @@ local function knowsSpell(spellId)
 end
 
 -- Assignment filter for My view:
---   - player set:   only if it matches me (case-insensitive, realm-stripped)
---   - player empty: items and reminders always pass (no way to class-filter
---                   a free-text reminder); spells/kicks only if I know them.
+--   - player set:   only if it matches me (case-insensitive, realm-stripped).
+--                   A named player is the most specific target, so role is
+--                   ignored in this branch.
+--   - player empty: if the assignment targets a role, my role must match; that
+--                   gate composes with the class filter below (so a paladin-only
+--                   Divine Shield tagged "tank" reaches paladin tanks only).
+--                   items and reminders always pass the class filter (no way to
+--                   class-filter a free-text reminder); spells/kicks only if I
+--                   know them.
 -- Exposed on CRP.ui so the combat HUD can apply the same "is this for me?"
 -- filter the personal view uses, without duplicating knowsSpell/stripRealm.
 function CRP.ui.IsMyAssignment(a)
@@ -135,6 +141,10 @@ function CRP.ui.IsMyAssignment(a)
 	if player ~= "" then
 		local me = UnitName("player") or ""
 		return stripRealm(player):lower() == stripRealm(me):lower()
+	end
+	local role = a.role or ""
+	if role ~= "" and not (CRP.Roles and CRP.Roles:Get() == role) then
+		return false
 	end
 	if a.kind == "item" or a.kind == "reminder" or a.kind == "equip" then
 		return true
@@ -172,6 +182,10 @@ local MARKER_LABEL = {
 	star = "Star", circle = "Circle", diamond = "Diamond", triangle = "Triangle",
 	moon = "Moon", square = "Square", cross = "Cross", skull = "Skull",
 }
+
+-- Display labels for role-targeted assignments (shown in the raid-view assignee
+-- cell when no specific player is named).
+local ROLE_LABEL = { tank = "Tanks", healer = "Healers", damage = "Damage" }
 
 local function markerInline(markerId)
 	local idx = MARKER_TEX_INDEX[markerId]
@@ -586,10 +600,9 @@ local function build()
 		-- widgets like the grip and nav buttons count as "still hovering."
 		-- The pull-jump popup is parented to UIParent (so it can outlive a
 		-- click on its anchor), so we hand-pin chrome to visible while it's
-		-- open. Empty-state holds chrome visible so the Import button is
-		-- discoverable on first launch.
+		-- open. The empty-state message is NOT chrome, so it stays visible while
+		-- the chrome fades — hovering the window reveals the Import button.
 		local sticky = (pullPopup and pullPopup:IsShown())
-			or (emptyMsg and emptyMsg:IsShown())
 		local over = self:IsMouseOver()
 		local reveal
 		if CRP.db and CRP.db.global and CRP.db.global.revealOnClick then
@@ -956,6 +969,7 @@ local function layoutAssignments(ctx)
 		row.target._tip = target ~= "" and target or nil
 
 		local player = a.player or ""
+		local role = a.role or ""
 		local note = a.note or ""
 		if my then
 			-- Assignee is hidden in My view. If there's a note, append it to
@@ -963,17 +977,25 @@ local function layoutAssignments(ctx)
 			row.assignee:Hide()
 			if note ~= "" then row.ability._tip = ability .. "\n\n" .. note end
 		else
+			-- Who it's for: a named player (cyan) wins; otherwise the role
+			-- label (amber, reads as a group). Combined with the note.
+			local who, color
+			if player ~= "" then
+				who, color = player, "c084fc"
+			elseif role ~= "" then
+				who, color = ROLE_LABEL[role] or role, "ffd100"
+			end
 			local assigneeText
-			if player ~= "" and note ~= "" then
-				assigneeText = string.format("|cffc084fc%s:|r %s", player, note)
-			elseif player ~= "" then
-				assigneeText = string.format("|cffc084fc%s|r", player)
+			if who and note ~= "" then
+				assigneeText = string.format("|cff%s%s:|r %s", color, who, note)
+			elseif who then
+				assigneeText = string.format("|cff%s%s|r", color, who)
 			else
 				assigneeText = note
 			end
 			local tipParts = {}
-			if player ~= "" then
-				tipParts[#tipParts + 1] = string.format("|cffc084fc%s|r", player)
+			if who then
+				tipParts[#tipParts + 1] = string.format("|cff%s%s|r", color, who)
 			end
 			if note ~= "" then tipParts[#tipParts + 1] = note end
 			anchorCell(row.assignee, row.target, "RIGHT", gap, cAssignee)

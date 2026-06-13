@@ -56,6 +56,20 @@ local function buildGeneral(container)
         function() return g.revealOnClick end,
         function(v) g.revealOnClick = v end)
 
+    -- Role override for role-targeted assignments. "auto" clears the override
+    -- and falls back to talent detection (Roles.lua); the label shows what auto
+    -- currently resolves to so the player can sanity-check it.
+    local role = AceGUI:Create("Dropdown")
+    local autoText = CRP.Roles and (" (now: " .. CRP.Roles:Get() .. ")") or ""
+    role:SetLabel("My role (for role-based assignments)")
+    role:SetList({ auto = "Auto-detect" .. autoText, tank = "Tank", healer = "Healer", damage = "Damage" })
+    role:SetValue((CRP.Roles and not CRP.Roles:IsAuto() and CRP.db.char.role) or "auto")
+    role:SetCallback("OnValueChanged", function(_, _, v)
+        if CRP.Roles then CRP.Roles:SetOverride(v) end
+        if CRP.ui and CRP.ui.Window then CRP.ui.Window:Refresh() end
+    end)
+    addFullWidth(container, role)
+
     toggle(container, "Debug: print kill GUIDs to chat",
         function() return g.debug end,
         function(v) g.debug = v end)

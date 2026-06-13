@@ -23,6 +23,9 @@ local defaults = {
     },
     char = {
         viewMode = "raid",          -- "raid" | "my" — swapped via header toggle
+        -- Manual role override for role-targeted assignments. nil = auto-detect
+        -- from talents (see Roles.lua). Set via /crp role or the options dropdown.
+        role = nil,                 -- nil | "tank" | "healer" | "damage"
         window = {
             position = nil,         -- { point, relPoint, x, y }; nil → center
             raidSize = nil,         -- { w, h } — resizes persist per mode
@@ -76,6 +79,12 @@ function Core:OnInitialize()
     eventFrame:RegisterEvent("GET_ITEM_INFO_RECEIVED")
     eventFrame:RegisterEvent("COMBAT_LOG_EVENT_UNFILTERED")
     eventFrame:RegisterEvent("PLAYER_ENTERING_WORLD")
+    -- Re-evaluate the auto-detected role when talents/group/zone change so the
+    -- personal view tracks the player's current spec (Roles:Recheck no-ops in
+    -- manual mode and when the detected role hasn't actually changed).
+    eventFrame:RegisterEvent("GROUP_JOINED")
+    eventFrame:RegisterEvent("ZONE_CHANGED_NEW_AREA")
+    eventFrame:RegisterEvent("SPELLS_CHANGED")
     eventFrame:SetScript("OnEvent", function(_, event, arg1, arg2)
         if event == "GET_ITEM_INFO_RECEIVED" then
             if CRP.ui and CRP.ui.Window then
@@ -86,12 +95,16 @@ function Core:OnInitialize()
                 CRP.Tracker:OnCombatLog()
             end
         elseif event == "PLAYER_ENTERING_WORLD" then
+            if CRP.Roles then CRP.Roles:Recheck() end
             if CRP.db.global.autoShow then
                 local inInstance, instanceType = IsInInstance()
                 if inInstance and instanceType == "raid" and CRP.ui and CRP.ui.Window then
                     CRP.ui.Window:Show()
                 end
             end
+        elseif event == "GROUP_JOINED" or event == "ZONE_CHANGED_NEW_AREA"
+            or event == "SPELLS_CHANGED" then
+            if CRP.Roles then CRP.Roles:Recheck() end
         end
     end)
 end
@@ -145,6 +158,22 @@ function Core:SlashHandler(input)
     elseif input == "reveal hover" then
         CRP.db.global.revealOnClick = false
         self:Print("Window chrome reveals on hover.")
+    elseif input == "role" or input:match("^role%s") then
+        local arg = input:match("^role%s+(%S+)")
+        if arg == "tank" or arg == "healer" or arg == "damage" then
+            CRP.Roles:SetOverride(arg)
+            self:Print("Your role is set to " .. arg .. " (manual override).")
+            if CRP.ui and CRP.ui.Window then CRP.ui.Window:Refresh() end
+        elseif arg == "auto" then
+            CRP.Roles:SetOverride(nil)
+            self:Print("Your role is now auto-detected from talents: " .. CRP.Roles:Get() .. ".")
+            if CRP.ui and CRP.ui.Window then CRP.ui.Window:Refresh() end
+        elseif not arg then
+            self:Print(string.format("Role: %s (%s). Set with /crp role tank|healer|damage|auto.",
+                CRP.Roles:Get(), CRP.Roles:IsAuto() and "auto-detected" or "manual"))
+        else
+            self:Print("Unknown role '" .. arg .. "'. Use /crp role tank|healer|damage|auto.")
+        end
     elseif input == "push" then
         local ok, err = CRP.Comms:PushPlan()
         if not ok and err then self:Print("Push failed: " .. err) end
@@ -167,6 +196,6 @@ function Core:SlashHandler(input)
     elseif input == "hud test off" then
         if CRP.HUD then CRP.HUD:SetTestMode(false); self:Print("HUD test mode: off.") end
     else
-        self:Print("Usage: /crp [show | import | next | prev | reset | clearkills | push | hud | auto on|off | autoimport on|off | autoshow on|off | reveal click|hover | my | raid]")
+        self:Print("Usage: /crp [show | import | next | prev | reset | clearkills | push | hud | auto on|off | autoimport on|off | autoshow on|off | reveal click|hover | role tank|healer|damage|auto | my | raid]")
     end
 end
