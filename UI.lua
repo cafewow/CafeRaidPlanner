@@ -7,13 +7,14 @@ CRP.ui.Window = Window
 -- Sidebar-shaped defaults. Window is laid out as a vertical stack of titled
 -- sections inside a single scroll frame, so height is mostly informational —
 -- the user can size up or down freely and section content reflows.
-local RAID_W, RAID_H = 330, 560
+local RAID_W, RAID_H = 390, 560
 local MY_W, MY_H = 290, 320
 
 -- MIN_W is set so the raid-view nav strip doesn't overlap: prev(24) + gap(4)
--- + next(24) + gap(6) + counter(96) + gap + push(50) + gap(4) + import(62)
--- plus the frame's 16px side margins ≈ 320; tuned to 330.
-local MIN_W, MIN_H = 330, 200
+-- + next(24) + gap(6) + counter(96) on the left, and plans(54) + gap(4)
+-- + push(50) + gap(4) + import(62) on the right, plus the frame's 16px side
+-- margins ≈ 380; tuned to 390.
+local MIN_W, MIN_H = 390, 200
 local MAX_W, MAX_H = 1200, 1200
 
 -- Section/row metrics
@@ -33,10 +34,11 @@ local COL_ASSIGNEE_MIN = 50
 local frame, content
 local pendingItemIds = {} -- items whose info was nil; refresh when GET_ITEM_INFO_RECEIVED fires
 local buildPullPopup, refreshPullPopupRows -- forward decls; defined later in file
+local buildPlansPopup, refreshPlansPopupRows -- forward decls; defined later in file
 
 -- Header chrome
 local pullTitle, pullCounter, packLine, emptyMsg
-local prevBtn, nextBtn, pushBtn, importBtn, modeBtn
+local prevBtn, nextBtn, pushBtn, importBtn, modeBtn, plansBtn
 local importDialog
 
 -- Object pools — every section element is parented to `content` (the scroll
@@ -538,6 +540,13 @@ local function build()
 		self:SetEnabled(CRP.Comms and CRP.Comms:CanPush() or false)
 	end)
 
+	-- Plans: opens the library picker (switch between stored plans, delete them).
+	plansBtn = CreateFrame("Button", nil, nav, "UIPanelButtonTemplate")
+	plansBtn:SetSize(54, 22)
+	plansBtn:SetPoint("RIGHT", pushBtn, "LEFT", -4, 0)
+	plansBtn:SetText("Plans")
+	plansBtn:SetScript("OnClick", function(self) Window:TogglePlansPopup(self) end)
+
 	-- pull title (large)
 	pullTitle = frame:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
 	pullTitle:SetPoint("TOPLEFT", 16, -72)
@@ -603,6 +612,7 @@ local function build()
 		-- open. The empty-state message is NOT chrome, so it stays visible while
 		-- the chrome fades — hovering the window reveals the Import button.
 		local sticky = (pullPopup and pullPopup:IsShown())
+				or (plansPopup and plansPopup:IsShown())
 		local over = self:IsMouseOver()
 		local reveal
 		if CRP.db and CRP.db.global and CRP.db.global.revealOnClick then
@@ -640,6 +650,7 @@ local function build()
 	end
 
 	buildPullPopup()
+	buildPlansPopup()
 end
 
 -- ----- pull display helpers (unchanged) --------------------------------------
@@ -773,6 +784,10 @@ function Window:ApplyMode()
 	local saved = my and CRP.db.char.window.mySize or CRP.db.char.window.raidSize
 	local w = (saved and saved.w) or (my and MY_W or RAID_W)
 	local h = (saved and saved.h) or (my and MY_H or RAID_H)
+	-- Raid view shows the full nav strip, so it needs at least MIN_W; a width
+	-- saved before the strip widened (for the Plans button) would overlap. My
+	-- view hides the strip, so its narrower default is fine.
+	if not my and w < MIN_W then w = MIN_W end
 	frame:SetSize(w, h)
 	modeBtn:SetText(my and "Raid view" or "My view")
 	-- Whole nav strip is for raid-leader actions; hide its children in My view.
@@ -1296,6 +1311,146 @@ function Window:TogglePullPopup(anchorBtn)
 	pullPopup:ClearAllPoints()
 	pullPopup:SetPoint("TOPLEFT", anchorBtn, "BOTTOMLEFT", 0, -2)
 	pullPopup:Show()
+end
+
+-- ----- plans popup (plan library: switch between / delete stored plans) ------
+
+local plansPopup, plansPopupRowPool, plansPopupContent, plansPopupScroll
+local PLANS_POPUP_W, PLANS_POPUP_H = 300, 240
+local PLANS_POPUP_ROW_H = 18
+
+-- Confirm before removing a stored plan from the library — the user may have
+-- several preloaded and a mis-click shouldn't drop one silently. data = plan id.
+StaticPopupDialogs["CRP_CONFIRM_DELETE_PLAN"] = {
+	text = "Delete plan \"%s\" from your library?",
+	button1 = YES or "Yes",
+	button2 = NO or "No",
+	OnAccept = function(self)
+		if self.data then CRP.Plan:Delete(self.data) end
+		if plansPopup and plansPopup:IsShown() then refreshPlansPopupRows() end
+	end,
+	timeout = 0,
+	whileDead = true,
+	hideOnEscape = true,
+	preferredIndex = 3,
+}
+
+function buildPlansPopup()
+	plansPopup = CreateFrame("Frame", "CafeRaidPlannerPlansPopup", UIParent, "BackdropTemplate")
+	plansPopup:SetFrameStrata("TOOLTIP")
+	plansPopup:SetSize(PLANS_POPUP_W, PLANS_POPUP_H)
+	plansPopup:SetPoint("CENTER")
+	plansPopup:EnableMouse(true)
+	plansPopup:Hide()
+	plansPopup:SetBackdrop({
+		bgFile = "Interface\\DialogFrame\\UI-DialogBox-Background-Dark",
+		edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
+		tile = true,
+		tileSize = 16,
+		edgeSize = 12,
+		insets = { left = 3, right = 3, top = 3, bottom = 3 },
+	})
+
+	plansPopupScroll = CreateFrame("ScrollFrame", nil, plansPopup, "UIPanelScrollFrameTemplate")
+	plansPopupScroll:SetPoint("TOPLEFT", 8, -8)
+	plansPopupScroll:SetPoint("BOTTOMRIGHT", -28, 8)
+	plansPopupContent = CreateFrame("Frame", nil, plansPopupScroll)
+	plansPopupContent:SetSize(PLANS_POPUP_W - 8 - 28, 1)
+	plansPopupScroll:SetScrollChild(plansPopupContent)
+	plansPopupRowPool = {}
+
+	local empty = plansPopupContent:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
+	empty:SetPoint("TOPLEFT", 6, -6)
+	empty:SetPoint("RIGHT", plansPopupContent, "RIGHT", -6, 0)
+	empty:SetJustifyH("LEFT")
+	empty:SetText("No plans yet.\nUse Import… to add one.")
+	empty:Hide()
+	plansPopup.empty = empty
+
+	plansPopup:SetScript("OnShow", function(self) self:RegisterEvent("GLOBAL_MOUSE_DOWN") end)
+	plansPopup:SetScript("OnHide", function(self) self:UnregisterEvent("GLOBAL_MOUSE_DOWN") end)
+	plansPopup:SetScript("OnEvent", function(self, event)
+		if event == "GLOBAL_MOUSE_DOWN"
+			and not self:IsMouseOver()
+			and not (plansBtn and plansBtn:IsMouseOver()) then
+			self:Hide()
+		end
+	end)
+end
+
+local function getPlansRow(i)
+	local row = plansPopupRowPool[i]
+	if row then return row end
+	row = CreateFrame("Button", nil, plansPopupContent)
+	row:SetHeight(PLANS_POPUP_ROW_H)
+	row:ClearAllPoints()
+	row:SetPoint("TOPLEFT", plansPopupContent, "TOPLEFT", 0, -(i - 1) * PLANS_POPUP_ROW_H)
+	row:SetPoint("RIGHT", plansPopupContent, "RIGHT", 0, 0)
+	local bg = row:CreateTexture(nil, "BACKGROUND")
+	bg:SetAllPoints()
+	bg:SetColorTexture(1, 1, 1, 0)
+	row.bg = bg
+
+	local del = CreateFrame("Button", nil, row, "UIPanelButtonTemplate")
+	del:SetSize(18, 16)
+	del:SetPoint("RIGHT", row, "RIGHT", -2, 0)
+	del:SetText("X")
+	row.del = del
+
+	local text = row:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+	text:SetPoint("LEFT", 6, 0)
+	text:SetPoint("RIGHT", del, "LEFT", -4, 0)
+	text:SetJustifyH("LEFT")
+	text:SetWordWrap(false)
+	row.text = text
+
+	row:SetScript("OnEnter", function(s) s.bg:SetColorTexture(1, 1, 1, 0.12) end)
+	row:SetScript("OnLeave", function(s) s.bg:SetColorTexture(1, 1, 1, 0) end)
+	plansPopupRowPool[i] = row
+	return row
+end
+
+function refreshPlansPopupRows()
+	if not plansPopup then return end
+	local list = CRP.Plan:List()
+	for i, info in ipairs(list) do
+		local row = getPlansRow(i)
+		local marker = info.active and "|cffffd54a> |r" or ""
+		row.text:SetText(string.format(
+			"%s%s |cff808080(%d pull%s)|r",
+			marker, info.name, info.pulls, info.pulls == 1 and "" or "s"))
+		row:SetScript("OnClick", function()
+			CRP.Plan:Select(info.id)
+			plansPopup:Hide()
+		end)
+		row.del:SetScript("OnClick", function()
+			StaticPopup_Show("CRP_CONFIRM_DELETE_PLAN", info.name, nil, info.id)
+		end)
+		row:Show()
+	end
+	for i = #list + 1, #plansPopupRowPool do plansPopupRowPool[i]:Hide() end
+	if plansPopup.empty then
+		if #list == 0 then plansPopup.empty:Show() else plansPopup.empty:Hide() end
+	end
+	plansPopupContent:SetHeight(math.max(1, #list * PLANS_POPUP_ROW_H))
+	if plansPopupScroll.UpdateScrollChildRect then plansPopupScroll:UpdateScrollChildRect() end
+	if not plansPopup._warmed then
+		plansPopup._warmed = true
+		plansPopup:Show()
+		plansPopup:Hide()
+	end
+end
+
+function Window:TogglePlansPopup(anchorBtn)
+	if not plansPopup then return end
+	if plansPopup:IsShown() then
+		plansPopup:Hide()
+		return
+	end
+	refreshPlansPopupRows()
+	plansPopup:ClearAllPoints()
+	plansPopup:SetPoint("TOPRIGHT", anchorBtn, "BOTTOMRIGHT", 0, -2)
+	plansPopup:Show()
 end
 
 -- ----- import dialog (unchanged) --------------------------------------------

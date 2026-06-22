@@ -9,8 +9,8 @@ local warnedUnresolved = {}
 
 -- Lazy { [packId] = pack } lookup map. PackById is called once per pack per
 -- pull on every Window:Refresh, so the O(packs·packsPerPull) scan over a 30-
--- pack plan was the heaviest part of a refresh. Cleared whenever the plan
--- changes; built on first access via ensurePackIndex().
+-- pack plan was the heaviest part of a refresh. Cleared whenever the active
+-- plan changes; built on first access via ensurePackIndex().
 local packIndex = nil
 local function ensurePackIndex()
     if packIndex then return packIndex end
@@ -25,37 +25,131 @@ local function ensurePackIndex()
 end
 local function invalidatePackIndex() packIndex = nil end
 
--- Returns the current plan envelope {v, preset, packs} or nil if none imported.
-function Plan:Current()
-    return CRP.db and CRP.db.global and CRP.db.global.plan
+-- The plan library is a dynamic key set, so it's created on first use rather
+-- than seeded as an AceDB default.
+local function ensurePlans()
+    local g = CRP.db and CRP.db.global
+    if not g then return {} end
+    if type(g.plans) ~= "table" then g.plans = {} end
+    return g.plans
 end
 
-function Plan:Import(envelope)
-    if type(envelope) ~= "table" or type(envelope.preset) ~= "table" then return false end
-    CRP.db.global.plan = envelope
+-- Any plan id in the library (used to pick a fallback active plan after a
+-- delete). Deterministic-ish: prefers the lexically-first id so the choice is
+-- stable across calls rather than depending on pairs() order.
+local function anyPlanId(plans)
+    local best
+    for id in pairs(plans) do
+        if not best or id < best then best = id end
+    end
+    return best
+end
+
+-- Returns the active plan envelope {v, preset, packs} or nil if none loaded.
+function Plan:Current()
+    local g = CRP.db and CRP.db.global
+    if not g or not g.currentPlanId then return nil end
+    return ensurePlans()[g.currentPlanId]
+end
+
+-- Reset the live runtime state to the start of whatever plan is now active.
+-- Only one plan is ever loaded, so switching/importing discards the previous
+-- plan's cursor and kills — they don't matter once we've moved on.
+local function loadActive()
     CRP.db.global.currentPullIdx = 1
     wipe(warnedUnresolved)
     invalidatePackIndex()
-    if CRP.Tracker and CRP.Tracker.Clear then
-        CRP.Tracker:Clear()     -- new plan → pull uids changed, prior kills meaningless
+    if CRP.Tracker and CRP.Tracker.Clear then CRP.Tracker:Clear() end
+    if CRP.HUD and CRP.HUD.OnPullChanged then CRP.HUD:OnPullChanged() end
+end
+
+-- Import an envelope into the library and make it active. Keyed by preset id so
+-- a re-import (or a re-pushed plan) replaces that entry rather than piling up
+-- duplicates; a genuinely different plan gets its own slot and coexists as a
+-- dormant envelope. Returns true, planId.
+function Plan:Import(envelope)
+    if type(envelope) ~= "table" or type(envelope.preset) ~= "table" then return false end
+    local id = envelope.preset.id
+    if not id or id == "" then id = "plan-" .. tostring(time()) end
+    ensurePlans()[id] = envelope
+    CRP.db.global.currentPlanId = id
+    loadActive()
+    return true, id
+end
+
+-- Switch the active plan to a stored one. The previous plan's runtime data is
+-- discarded (loadActive resets the cursor and clears the tracker) — only the
+-- loaded plan is ever tracked.
+function Plan:Select(id)
+    local plans = ensurePlans()
+    if not plans[id] then return false end
+    if CRP.db.global.currentPlanId ~= id then
+        CRP.db.global.currentPlanId = id
+        loadActive()
     end
-    if CRP.HUD and CRP.HUD.OnPullChanged then
-        CRP.HUD:OnPullChanged()
+    if CRP.ui and CRP.ui.Window and CRP.ui.Window.Refresh then
+        CRP.ui.Window:Refresh()
     end
     return true
 end
 
+-- Remove a stored plan. If it was active, fall back to any remaining plan (or
+-- nil → empty state) and reset the runtime state onto it.
+function Plan:Delete(id)
+    local plans = ensurePlans()
+    if not plans[id] then return false end
+    plans[id] = nil
+    if CRP.db.global.currentPlanId == id then
+        CRP.db.global.currentPlanId = anyPlanId(plans)
+        loadActive()
+    end
+    if CRP.ui and CRP.ui.Window and CRP.ui.Window.Refresh then
+        CRP.ui.Window:Refresh()
+    end
+    return true
+end
+
+-- List stored plans for the picker / slash list. Each row:
+-- { id, name, pulls, packs, active }. Sorted by name (case-insensitive).
+function Plan:List()
+    local plans = ensurePlans()
+    local activeId = CRP.db and CRP.db.global and CRP.db.global.currentPlanId
+    local out = {}
+    for id, env in pairs(plans) do
+        local preset = env and env.preset
+        out[#out + 1] = {
+            id = id,
+            name = (preset and preset.name and preset.name ~= "" and preset.name) or "Unnamed plan",
+            pulls = (preset and preset.pulls and #preset.pulls) or 0,
+            packs = (env and env.packs and #env.packs) or 0,
+            active = (id == activeId),
+        }
+    end
+    -- Sort by name, then id as a stable tiebreak so the suffixing below is
+    -- deterministic across calls when names collide.
+    table.sort(out, function(a, b)
+        if a.name:lower() ~= b.name:lower() then return a.name:lower() < b.name:lower() end
+        return a.id < b.id
+    end)
+    -- Plans are keyed by id, so same-named plans coexist; disambiguate them for
+    -- display only (the first keeps its name, the next becomes "Name (2)", …),
+    -- mirroring the web planner so the picker rows aren't indistinguishable.
+    local seen = {}
+    for _, row in ipairs(out) do
+        local key = row.name:lower()
+        seen[key] = (seen[key] or 0) + 1
+        if seen[key] > 1 then
+            row.name = string.format("%s (%d)", row.name, seen[key])
+        end
+    end
+    return out
+end
+
+-- Delete the active plan (the /crp reset command). Falls through to Delete,
+-- which selects a remaining plan or drops to the empty state.
 function Plan:Clear()
-    CRP.db.global.plan = nil
-    CRP.db.global.currentPullIdx = 1
-    wipe(warnedUnresolved)
-    invalidatePackIndex()
-    if CRP.Tracker and CRP.Tracker.Clear then
-        CRP.Tracker:Clear()
-    end
-    if CRP.HUD and CRP.HUD.OnPullChanged then
-        CRP.HUD:OnPullChanged()
-    end
+    local id = CRP.db and CRP.db.global and CRP.db.global.currentPlanId
+    if id then self:Delete(id) end
 end
 
 function Plan:Pulls()

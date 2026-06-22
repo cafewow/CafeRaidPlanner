@@ -9,14 +9,22 @@ CRP.Core = Core
 
 local defaults = {
     global = {
-        plan = nil,                 -- envelope {v, preset, packs} imported from web
-        currentPullIdx = 1,
+        -- Plan library: imported plan envelopes live in db.global.plans, keyed by
+        -- their preset id, with the active one named by currentPlanId. The map is
+        -- a dynamic key set, so it's lazily created in Plan.lua rather than seeded
+        -- here (AceDB defaults are best for fixed-shape tables). Only one plan is
+        -- ever "loaded" — the live runtime state (currentPullIdx + trackerState)
+        -- describes the active plan and is reset when you switch. The others are
+        -- just dormant envelopes until selected. Legacy single-plan field `plan`
+        -- is migrated into the library once, in OnInitialize.
+        currentPlanId = nil,        -- id of the active plan, or nil if none loaded
+        currentPullIdx = 1,         -- cursor within the active plan
         autoAdvance = true,         -- advance current pull when all required mobs die
         autoApplyIncomingPlan = false, -- true → skip receive prompt and apply silently
         autoShow = true,            -- open window on raid zone-in and after importing a pushed plan
         revealOnClick = false,      -- chrome reveal trigger: false → hover, true → click inside the window
         killLookahead = 3,          -- greedy matcher window: kills overflow into the next N pulls
-        trackerState = {            -- persisted kill progress, keyed by instance lockout
+        trackerState = {            -- persisted kill progress for the active plan, keyed by lockout
             lockoutKey = nil,
             killsByPullUid = {},
         },
@@ -63,6 +71,22 @@ local eventFrame
 function Core:OnInitialize()
     self.db = AceDB:New("CafeRaidPlannerDB", defaults, true)
     CRP.db = self.db
+
+    -- One-time migration: the original single loaded plan (db.global.plan) moves
+    -- into the library, keyed by its preset id so a later re-import/push of the
+    -- same plan updates it in place. The live runtime state (currentPullIdx +
+    -- trackerState) already describes that plan, so it stays as-is. Runs once —
+    -- g.plan is cleared afterward.
+    local g = self.db.global
+    if g.plan ~= nil then
+        local env = g.plan
+        local id = (type(env) == "table" and env.preset and env.preset.id)
+            or ("legacy-" .. tostring(time()))
+        g.plans = g.plans or {}
+        g.plans[id] = env
+        g.currentPlanId = id
+        g.plan = nil
+    end
 
     self:RegisterChatCommand("crp", "SlashHandler")
     self:RegisterChatCommand("caferaidplanner", "SlashHandler")
@@ -129,7 +153,24 @@ function Core:SlashHandler(input)
     elseif input == "reset" then
         CRP.Plan:Clear()
         CRP.ui.Window:Refresh()
-        self:Print("Plan cleared.")
+        local left = #CRP.Plan:List()
+        if left > 0 then
+            self:Print(("Removed the active plan; %d still in your library (use the Plans button to switch)."):format(left))
+        else
+            self:Print("Removed the active plan. Library is now empty.")
+        end
+    elseif input == "plans" then
+        local list = CRP.Plan:List()
+        if #list == 0 then
+            self:Print("No plans in your library. Use /crp import to add one.")
+        else
+            self:Print(("Plan library (%d):"):format(#list))
+            for _, info in ipairs(list) do
+                self:Print(("  %s%s|r — %d pulls, %d packs"):format(
+                    info.active and "|cffffd54a" or "|cffffffff",
+                    info.name, info.pulls, info.packs))
+            end
+        end
     elseif input == "clearkills" or input == "clear kills" then
         if CRP.Tracker then CRP.Tracker:Clear() end
         if CRP.ui.Window then CRP.ui.Window:Refresh() end
@@ -196,6 +237,6 @@ function Core:SlashHandler(input)
     elseif input == "hud test off" then
         if CRP.HUD then CRP.HUD:SetTestMode(false); self:Print("HUD test mode: off.") end
     else
-        self:Print("Usage: /crp [show | import | next | prev | reset | clearkills | push | hud | auto on|off | autoimport on|off | autoshow on|off | reveal click|hover | role tank|healer|damage|auto | my | raid]")
+        self:Print("Usage: /crp [show | import | plans | next | prev | reset | clearkills | push | hud | auto on|off | autoimport on|off | autoshow on|off | reveal click|hover | role tank|healer|damage|auto | my | raid]")
     end
 end

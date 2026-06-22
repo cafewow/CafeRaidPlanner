@@ -190,7 +190,7 @@ function Comms:Init()
             Comms:_ApplyIncoming(msg.envelope, msg.currentPullIdx, sender)
         else
             local env = msg.envelope
-            local summary = ("%s sent a raid plan (%d pulls, %d packs).\n\nImport? Your current plan and kill progress will be replaced."):format(
+            local summary = ("%s sent a raid plan (%d pulls, %d packs).\n\nImport? It'll be added to your saved plans and made active."):format(
                 stripRealm(sender), #(env.preset.pulls or {}), #(env.packs or {}))
             StaticPopup_Show("CRP_CONFIRM_IMPORT", summary, nil, {
                 envelope = env,

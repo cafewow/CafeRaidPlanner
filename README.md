@@ -67,6 +67,13 @@ Plays nicely with OmniCC since it uses the standard cooldown template.
 4. As raid leader, hit **Push** in the addon to broadcast the plan + current
    pull index to everyone else in the raid. They'll get a prompt to import.
 
+Imported plans are kept in a library rather than overwriting each other, so you
+can preload several (e.g. one per raid for the night) and switch between them
+with the **Plans** button in the window. Only one plan is loaded at a time —
+switching starts the new one fresh and discards the previous plan's pull cursor
+and kill progress. Re-importing or being re-pushed the same plan updates it in
+place instead of stacking duplicates.
+
 The current pull advances on its own as packs die. If you go off-script
 (skipped a pull, came back to redo one) you can jump to any pull from the
 counter dropdown — the tracker fills in or clears intermediate kill state
@@ -89,6 +96,7 @@ and CCs, then export a share string. The addon imports that string.
 | ------------------------- | -------------------------------------------------------- |
 | `/crp`                    | toggle the window                                        |
 | `/crp import`             | open the paste-string dialog                             |
+| `/crp plans`              | list the stored plans in your library                    |
 | `/crp next` / `/crp prev` | navigate pulls manually                                  |
 | `/crp my` / `/crp raid`   | switch view mode                                         |
 | `/crp push`               | broadcast plan + current pull to the raid                |
@@ -98,7 +106,7 @@ and CCs, then export a share string. The addon imports that string.
 | `/crp reveal click\|hover`| reveal the window chrome on click vs. hover (default hover)|
 | `/crp role tank\|healer\|damage\|auto` | set your role for role-targeted assignments (default auto-detect) |
 | `/crp clearkills`         | reset tracked kills without dropping the plan            |
-| `/crp reset`              | drop the plan entirely                                   |
+| `/crp reset`              | remove the active plan from the library (switches to another if any) |
 | `/crp debug on\|off`      | log each UNIT_DIED GUID, for lockout troubleshooting     |
 
 ## Related

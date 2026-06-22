@@ -6,13 +6,16 @@ CRP.Tracker = Tracker
 -- Dedupe of UNIT_DIED events within the same lockout (in-memory only).
 local processedGUIDs = {}
 
--- Persistent tracker state:
+-- Persistent tracker state for the active plan:
 --   CRP.db.global.trackerState = {
 --     lockoutKey     = "<serverID>-<instanceID>",   -- GUID fingerprint of current lockout
 --     killsByPullUid = { [pullUid] = { [npcId] = count } },
 --   }
+-- Only one plan is loaded at a time, so this is global to the active plan.
 -- Switching pulls doesn't wipe — it just changes which slice we display.
--- Lockout change wipes the entire killsByPullUid map. /crp clearkills wipes too.
+-- Switching/importing a plan (Plan:loadActive) wipes it, since the previous
+-- plan's progress no longer matters. Lockout change wipes the whole
+-- killsByPullUid map. /crp clearkills wipes too.
 local function ensureState()
     local s = CRP.db.global.trackerState
     if not s then
@@ -134,7 +137,7 @@ function Tracker:ResetCurrentPull()
 end
 
 -- Wipe everything including the lockout fingerprint. Called from /crp clearkills
--- and from Plan:Clear / Plan:Import (new plan → prior kills meaningless).
+-- and from Plan:loadActive (switch/import → the previous plan's kills are moot).
 function Tracker:Clear()
     local state = ensureState()
     state.killsByPullUid = {}
