@@ -222,13 +222,61 @@ function Plan:Prev()
     self:SetCurrentPullIdx(self:CurrentPullIdx() - 1)
 end
 
--- A prep step: authored in the planner with no mobs, surfaced by the HUD
--- between pulls (out of combat) for buffs / summons / gear swaps. The `prep`
--- flag rides along in the preset (share format is a JSON passthrough), so it's
--- present here untouched. We key off the explicit flag rather than "has no
--- slots" so a misconfigured empty real pull isn't mistaken for prep.
+-- True iff the pull references at least one mob to kill. A pull with no packs,
+-- or only empty/missing packs, has nothing to fight. Cheaper than SlotsForPull
+-- (no slot-table allocation) since it only needs existence, not counts.
+function Plan:HasMobs(pull)
+    if not (pull and pull.packIds) then return false end
+    for _, packId in ipairs(pull.packIds) do
+        local pack = self:PackById(packId)
+        if pack and pack.members and #pack.members > 0 then
+            return true
+        end
+    end
+    return false
+end
+
+-- A prep step: surfaced by the HUD between pulls (out of combat) for buffs /
+-- summons / gear swaps. Either explicitly flagged in the planner (`prep`, which
+-- rides along in the preset since the share format is a JSON passthrough) OR any
+-- step with no mobs to kill. A mob-less step can never auto-advance on a kill,
+-- so treating it as prep is what lets AdvancePastPrep move the cursor off it at
+-- combat start — otherwise forgetting the flag traps the cursor there. (We used
+-- to require the explicit flag to avoid mistaking a misconfigured empty pull for
+-- prep, but getting stuck is the worse failure; SlotsForPull still warns on
+-- genuinely broken pack references.)
 function Plan:IsPrepPull(pull)
-    return pull ~= nil and pull.prep == true
+    if pull == nil then return false end
+    if pull.prep == true then return true end
+    return not self:HasMobs(pull)
+end
+
+-- An assignment carries something worth showing iff it's a non-empty reminder or
+-- a picked spell/item/equip/kick (numeric id). Mirrors the UI's `hasContent`.
+local function assignmentHasContent(a)
+    if not a then return false end
+    if a.kind == "reminder" then
+        return a.text ~= nil and a.text ~= ""
+    end
+    return type(a.id) == "number"
+end
+
+-- A step with nothing to it at all: no mobs, no note, no real assignments. These
+-- are almost always an accidental blank pull, and there's literally nothing for
+-- the HUD to show, so auto-advance passes straight through rather than parking
+-- the cursor on a blank box. (A mob-less step that *does* carry a note or
+-- assignments is a real prep step — IsPrepPull true, IsEmptyStep false — and
+-- still gets dwelt on out of combat so people can read it.) The `prep` flag is
+-- ignored here: an explicitly-flagged but contentless step is still nothing to
+-- show, so it's skippable too.
+function Plan:IsEmptyStep(pull)
+    if not pull then return false end
+    if self:HasMobs(pull) then return false end
+    if pull.note and pull.note ~= "" then return false end
+    for _, a in ipairs(pull.assignments or {}) do
+        if assignmentHasContent(a) then return false end
+    end
+    return true
 end
 
 -- Combat-start advance for prep steps. A mob-less step can't auto-advance on a
@@ -264,7 +312,11 @@ function Plan:AdvanceToNextIncomplete()
     local target = idx
     while target < n do
         local probe = target + 1
-        if CRP.Tracker:IsPullCompleteFor(pulls[probe]) then
+        -- Pass through pulls that are already done (e.g. pre-filled by overflow
+        -- kills) and steps that are entirely empty (nothing to show — see
+        -- IsEmptyStep), stopping at the first pull that actually needs attention:
+        -- a real incomplete pull, or a prep step carrying notes/assignments.
+        if CRP.Tracker:IsPullCompleteFor(pulls[probe]) or self:IsEmptyStep(pulls[probe]) then
             target = probe
         else
             target = probe
